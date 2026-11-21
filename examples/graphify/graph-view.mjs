@@ -15,6 +15,12 @@ export const relations = Object.freeze({
   calls: 'calls', crate_depends_on: 'depends on', depends_on: 'depends on',
   imports: 'imports', contains: 'contains', method: 'has method',
   inherits: 'inherits from', implements: 'implements',
+  connection_site: 'contains connection site',
+  callback: 'references callback',
+  member_access_site: 'contains member access',
+  unresolved_call_site: 'contains unresolved call',
+  reads: 'reads',
+  writes: 'writes',
 });
 export function describeEdge(edge, byId) {
   const raw = clipped(edge.relation || 'related', 128);
@@ -78,9 +84,28 @@ function searchNodes(candidates, query) {
     if (id === term || label === term) exactSymbols.push(node);
     else if (file === pathTerm) exactPaths.push(node);
     else if (file.slice(file.lastIndexOf('/') + 1) === pathTerm) filenames.push(node);
-    else if (id.includes(term) || label.includes(term) || file.includes(pathTerm)) partial.push(node);
+    else if (id.includes(term) || label.includes(term) || file.includes(pathTerm)
+      || (node.rah_connection?.version === 1 && typeof node.rah_connection.expression === 'string'
+        && node.rah_connection.expression.toLowerCase().includes(term))) partial.push(node);
   }
   return exactSymbols.concat(exactPaths, filenames, partial);
+}
+
+function nodeDetail(node) {
+  const location = node.source_file
+    ? `${node.source_file} ${node.source_location || ''}`
+    : node.external_reference ? `External reference: ${node.external_reference}` : 'No source reference';
+  const connection = node.rah_connection;
+  if (connection?.version === 1 && typeof connection.expression === 'string') {
+    const kind = connection.kind === 'qt' ? 'Qt' : 'Event';
+    const resolution = connection.resolution === 'unresolved' ? ' (callback unresolved)' : '';
+    return `${location}\n${kind} connection candidate${resolution}\n${connection.expression}`;
+  }
+  if (node.rah_unresolved_call) return `Unresolved call: ${location}\n${node.label}`;
+  if (node.rah_member_access === 'reads') return `Member read: ${location}\n${node.label}`;
+  if (node.rah_member_access === 'writes') return `Member write: ${location}\n${node.label}`;
+  const kind = node.summary ? 'File summary' : node._py_property ? 'Property definition' : 'Definition';
+  return `${kind}: ${location}\n${node.id}`;
 }
 
 export function projectGraph(graph, { query = '', group = 'All groups', focus = '', metadata = false, direction = 'all', relation = 'all' } = {}) {
@@ -120,7 +145,7 @@ export function projectGraph(graph, { query = '', group = 'All groups', focus = 
   const selectedEdges = edges.filter(edge => ids.has(edge.source) && ids.has(edge.target));
   const vertices = [...ids].map(id => byId.get(id)).filter(node => node.id.length <= 512).map(node => ({
     id: node.id, label: clipped(node.label || node.id, 128), group: groupOf(node),
-    detail: clipped(`${node.summary ? 'File summary' : 'Definition'}: ${node.source_file || (node.external_reference ? `External reference: ${node.external_reference}` : 'No source reference')} ${node.source_location || ''}\n${node.id}`, 512),
+    detail: clipped(nodeDetail(node), 512),
   }));
   const kept = new Set(vertices.map(node => node.id));
   const node = { type: 'graph', title: focus ? 'Selected node and direct relationships' : q ? `Search: ${clipped(query, 100)}` : 'Workspace relationships',
@@ -205,7 +230,7 @@ export class GraphView {
         ] },
         { type: 'button', action: 'graph_back', label: 'Back expansion' },
         { type: 'button', action: 'graph_reset', label: 'Reset graph query' },
-        { type: 'text', text: `Active-level edges after relationship filters: ${projection.filteredEdges}; edges between candidate nodes before display caps: ${projection.queryEdges}; matching seed nodes: ${projection.matches}. Display caps: 80 high-degree overview seeds when no crate overview exists, 160 search seeds, 250 total nodes, 750 edges, 140 KiB graph bytes; 100 source-group and relation choices (relation names over 128 characters unavailable as choices). Node IDs over 512 characters cannot be rendered. Node details cover rendered edges only, with 30 items per direction. Use full-artifact search, filters and explicit expansion to narrow omitted relationships.` },
+        { type: 'text', text: `Active-level edges after relationship filters: ${projection.filteredEdges}; edges between candidate nodes before display caps: ${projection.queryEdges} (${projection.queryEdges - projection.node.edges.length} omitted); matching seed nodes: ${projection.matches}. Display caps: 80 high-degree overview seeds when no crate overview exists, 160 search seeds, 250 total nodes, 750 edges, 140 KiB graph bytes; 100 source-group and relation choices (relation names over 128 characters unavailable as choices). Node IDs over 512 characters cannot be rendered. Node details cover rendered edges only, with 30 items per direction. Use full-artifact search, filters and explicit expansion to narrow omitted relationships.` },
         projection.node,
         { type: 'text', text: 'Experimental graph reference: missing relationships never prove absence of use. Known gaps: member reads/writes, property classification, Qt signal/slot wiring and instance-attribute calls. Use source search and inspection. Colors represent source groups. Arrows in node details follow stored source → target order. EXTRACTED and INFERRED are Graphify classifications; verify original source before relying on a relationship.' },
       ];

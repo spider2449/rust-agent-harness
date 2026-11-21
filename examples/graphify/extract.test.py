@@ -6,10 +6,73 @@ import os
 import subprocess
 import unittest
 import sys
+import shutil
 from pathlib import Path
 
 sys.dont_write_bytecode = True
 import extract
+
+
+class ConnectionEvidenceTests(unittest.TestCase):
+    def test_export_preserves_each_site_and_source(self):
+        fixtures = Path(__file__).parent / "fixtures"
+        cases = json.loads((fixtures / "navigation-cases.json").read_bytes())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "project"
+            shutil.copytree(fixtures / "navigation", root)
+            for index in range(20):
+                (root / f"extra_{index}.py").write_text("value = 1\n")
+            with (root / "window.py").open("a", encoding="utf-8") as stream:
+                stream.write("\nEvent().connect(lambda: None).connect(callback=next_handler)\n")
+            stage = root.parent / "stage"
+            subprocess.run([sys.executable, "-I", str(Path(extract.__file__).resolve()),
+                            "extract", str(root), "--code-only", "--no-cluster", "--max-workers", "4",
+                            "--out", str(stage)], cwd=root,
+                           env={**os.environ, "PYTHONHASHSEED": "0"}, check=True)
+            graph = json.loads((stage / "graphify-out/graph.json").read_bytes())
+        sites = {n["id"]: n for n in graph["nodes"] if "rah_connection" in n}
+        self.assertEqual(len(sites), 7)
+        edges = [e for e in graph.get("edges", graph.get("links")) if e["relation"] == "connection_site"]
+        self.assertCountEqual([e["target"] for e in edges], sites.keys())
+        owners = {n["id"]: n for n in graph["nodes"]}
+        for site in sites.values():
+            evidence = site["rah_connection"]
+            line = site["source_location"].split(":")[0][1:]
+            self.assertEqual(site["source_file"], "window.py")
+            if line in cases["window.py"]:
+                _, slot, _, kind = cases["window.py"][line]
+                self.assertEqual((evidence["slot"], evidence["kind"]), (slot, kind))
+                self.assertTrue(evidence["owner"].startswith(".wire"))
+            else:
+                self.assertIn(evidence["slot"], {"lambda: None", "next_handler"})
+                self.assertEqual(evidence["owner"], "window.py")
+        for edge in edges:
+            self.assertEqual(owners[edge["source"]]["label"], sites[edge["target"]]["rah_connection"]["owner"])
+        multiline = next(n for n in sites.values() if n["source_location"].startswith("L37:"))
+        self.assertIn("\n", multiline["rah_connection"]["expression"])
+        callbacks = {
+            (sites[e["source"]]["source_location"].split(":")[0],
+             owners[e["target"]]["source_file"], owners[e["target"]]["label"])
+            for e in graph.get("edges", graph.get("links")) if e["relation"] == "callback"
+        }
+        self.assertEqual(callbacks, {
+            ("L33", "models.py", ".selSwCtl_trd()"),
+            ("L36", "window.py", ".menuHelp_triggered()"),
+            ("L37", "window.py", ".menuHelp_triggered()"),
+            ("L50", "window.py", ".menuHelp_triggered()"),
+            ("L78", "window.py", ".receive()"),
+        })
+        unresolved = [n for n in sites.values() if n["rah_connection"]["resolution"] == "unresolved"]
+        self.assertEqual(len(unresolved), 2)
+        access = {(e["relation"], e["source_location"].split(":")[0],
+                   owners[e["target"]]["label"])
+                  for e in graph.get("edges", graph.get("links"))
+                  if e["relation"] in {"reads", "writes"}}
+        self.assertTrue({("reads", "L24", "isSetKey"), ("writes", "L27", "isSetKey"),
+                         ("reads", "L45", ".switchValue()")} <= access)
+        unresolved_calls = {n["source_location"].split(":")[0] for n in graph["nodes"]
+                            if n.get("rah_unresolved_call")}
+        self.assertEqual(unresolved_calls, {"L21", "L65"})
 
 
 class InstanceCallbackTests(unittest.TestCase):

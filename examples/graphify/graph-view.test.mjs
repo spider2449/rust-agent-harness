@@ -5,6 +5,27 @@ import path from 'node:path';
 import test from 'node:test';
 import { GraphView, projectGraph, describeEdge, relations, levelGraph, graphLevels } from './graph-view.mjs';
 
+test('full-artifact search keeps independent connection locations and copyable evidence', () => {
+  const owner = { id: 'wire', label: '.wire()', source_file: 'window.py' };
+  const sites = [36, 37].map(line => ({
+    id: `connection-${line}`, label: `.connect() L${line}:9`, source_file: 'window.py',
+    source_location: `L${line}:9`,
+    rah_connection: { version: 1, kind: 'qt', expression: 'self.button.released.connect(self.slot)' },
+  }));
+  const graph = { nodes: [owner, ...sites], edges: sites.map(site => ({
+    source: owner.id, target: site.id, relation: 'connection_site', confidence: 'EXTRACTED',
+    source_file: site.source_file, source_location: site.source_location,
+  })) };
+  const { node, matches } = projectGraph(graph, { query: 'self.slot', metadata: true });
+  assert.equal(matches, 2);
+  assert.equal(node.edges.length, 2);
+  for (const site of sites) {
+    assert.equal(node.vertices.find(vertex => vertex.id === site.id).detail,
+      `window.py ${site.source_location}\nQt connection candidate\n${site.rah_connection.expression}`);
+    assert.match(node.edges.find(edge => edge.target === site.id).metadata.detail, new RegExp(site.source_location));
+  }
+});
+
 test('readable semantics retain raw provenance, unknown orientation and symmetric identity', () => {
   const names = new Map([['a', { label: 'A' }], ['b', { label: 'B' }]]);
   for (const [relation, verb] of Object.entries(relations)) {

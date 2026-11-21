@@ -36,3 +36,30 @@ The pinned export.py restores `_src`/`_tgt` to `source`/`target` before writing
 graph.json; undirected NetworkX storage does not authorize reversing displayed
 edges. Upstream may collapse reverse relationships before export; this view
 cannot reconstruct missing edges.
+# Python connection evidence
+
+Managed extraction emits a `connection_site` edge from the enclosing symbol
+or file to each Python `.connect()` call. Each site has its own node and
+workspace-relative source location. The column is a one-based UTF-8 byte
+column. The version 1 `rah_connection` node field contains the enclosing
+symbol label, the signal and callback expressions when present, and the full
+call expression with Graphify's credential redaction. Qt imports and recognizable receiver constructor bindings
+identify Qt candidates. Other calls remain general event candidates. An edge
+records a call site. An inferred `callback` edge links the site to a uniquely
+identified method. The extractor handles direct `self` references, simple
+same-file inheritance, and a single constructor assignment through an
+unambiguous absolute import rooted in the indexed workspace. Other callbacks
+retain the source expression and an unresolved status.
+
+Search the relationship view by callback expression to find the site nodes.
+Select a site to copy its source location and view the call text within the
+view's 512-character detail limit. Older artifacts remain readable and gain
+site evidence on their next successful managed rebuild.
+
+For supported Python member accesses, `member_access_site` links the
+enclosing method to an individual read or write site. A `reads` or `writes`
+edge then links that site to a property definition or to a field first
+declared through a unique direct assignment in a class initializer. This
+records the member name even when its value can change. Indexed receivers
+and calls through multiply assigned instance attributes retain unresolved
+call-site evidence. These rules cover a subset of Python's runtime binding.

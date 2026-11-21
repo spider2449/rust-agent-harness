@@ -1,6 +1,7 @@
 """Offline checks for fixture locations and relation scoring."""
 import runpy
 import unittest
+import json
 from pathlib import Path
 
 BASELINE = runpy.run_path(str(Path(__file__).with_name("navigation-baseline.py")))
@@ -41,6 +42,12 @@ class NavigationBaselineTests(unittest.TestCase):
         score = BASELINE["score"](self.sites, [callback, decoy, wrong_callback])
         self.assertEqual(score["sites"]["hit_with_wrong"], 1)
         self.assertEqual(score["target_pairs"]["hit_with_wrong"], 1)
+
+    def test_multiline_ripgrep_match_counts_the_connect_token_line(self):
+        result = dict(type="match", data=dict(path={"text": "window.py"},
+                      lines={"text": "訊號.\n  connect(\n"}, line_number=36,
+                      submatches=[{"start": len("訊號".encode())}]))
+        self.assertEqual(BASELINE["source_match_lines"](json.dumps(result)), {("window.py", 37)})
 
 
 if __name__ == "__main__":

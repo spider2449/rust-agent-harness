@@ -44,12 +44,18 @@ napari 的 103 個未判分位置包含 90 個同類別規則以外的 callback 
 
 **驗收**：合成案例中的每個接線位置均可查回，同一 slot 的兩個接線位置分別顯示，不支援的 callback 形式保留可查的原文。Qt 與一般同名案例的分類符合預期。舊圖、重建失敗、工作區切換及既有視圖測試通過。
 
+P1 採用獨立的接線位置節點。固定版本的 Graphify 匯出測試涵蓋 5 個原有接線位置與 2 個同起點的鏈式呼叫，保留各自的節點和來源位置。關係視圖可用 callback 表達式搜尋，測試涵蓋同一 slot 的兩處接線。資料欄位見 [Graphify 關係說明](../../examples/graphify/RELATIONS.md#python-connection-evidence)。
+
 ## P2 Graphify 補強 Python 目標與成員存取
 
 - 沿用現有 constructor 賦值與 import alias 邏輯，先處理 `self.infoI.selSwCtl_trd` 與 `self.ik2fk(partI)`。要求類別與候選目標唯一，遇到多次賦值、候選衝突或未知 receiver 時標示未解析，保留呼叫位置。
 - 區分 property 定義、成員讀取、成員寫入及呼叫。驗證 `switchValue` 讀取與 `isSetKey` 寫入。先限於 AST 可證明的存取位置與綁定。索引後的物件鏈只在元素型別和目標可判定時列入後續增量。
 
 **驗收**：針對 P0 具可判定目標的案例逐筆比對。任何同名誤連都阻擋該解析規則啟用。讀取、寫入與呼叫有各自的關係及位置。重跑 napari，公開命中、漏連與誤連計數。
+
+P2 的合成案例命中 10／10 個可判分位置，其中 5 個為 callback。未觀察到誤連。索引後 receiver 和重複賦值的 callable 保留未解析的來源位置。
+
+在固定版本的 napari `_qt` 重跑，433 個接線位置中有 330 個可判分。330 個位置全部命中，共 291 組關係，漏連與誤連各為 0。103 個未判分位置中，90 個超出同類別規則，13 個缺少可唯一識別且無裝飾器的方法。此次 Windows 擷取耗時 49.118 秒，MCP 範例查詢耗時 0.016 秒。
 
 ## P3 加入可選的 CBM MCP 設定
 
@@ -59,10 +65,32 @@ napari 的 103 個未判分位置包含 90 個同類別規則以外的 callback 
 
 **驗收**：用 mock model 經 `ToolInvoker` 逐項呼叫 4 個工具。其他工具未對 model 暴露。跨工作區、未知 `project`、缺少索引、超大輸出及停止程序均有確定結果。Windows 用真實 CBM 重跑 napari 案例並檢查結果與直接 CLI 一致。其他平台逐一記錄驗證結果。
 
+P3 的 [Windows 設定範例](../../examples/mcp/CBM.md) 使用既有的 MCP、程序監督與權限插件。Windows x64 已以 CBM 0.12.1 在固定版本的 napari 驗證四個查詢工具。關係查詢的三筆樣本與同索引的直接 CLI 結果一致。macOS 與 Linux 的 CBM 執行檔與程序生命週期仍待驗證。
+
 ## P4 整合驗收與發行決策
 
 - P0 先完成。P1 與 P3 可各自推進。P2 依賴 P1 先固定接線位置與來源證據的表示方式。P4 整理兩條線的結果後再決定是否提供安裝命令、離線套件或自動索引。
 - 用同一批案例量測 Graphify、CBM 和原始碼搜尋。至少分開報告接線位置、目標命中與誤連、冷索引與單次查詢耗時。記錄測量條件。真實專案的結果缺少時保留試驗定位。
 - 依階段執行相關 Graphify Node／Python 與 RAH MCP 測試。階段結束按倉庫規則執行 `cargo fmt --check`、`cargo check --workspace`、`cargo test --workspace --no-fail-fast`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 及 `git diff --check`。持續存在的缺失記入 `KNOWN_ISSUES.md`。
+
+### P4 驗收結果
+
+使用 Windows x64、Python 3.14.6、managed Graphify 0.9.107、CBM 0.12.1 fast 與 ripgrep 15.2.0。兩組資料各自使用新的 Graphify 輸出目錄及隔離的 CBM 快取與 daemon 目錄。報告可用 [評測指令](../../examples/graphify/README.md#python-and-qt-navigation-baseline) 重跑。
+
+| 案例 | Graphify | CBM | ripgrep |
+| --- | --- | --- | --- |
+| 合成案例 | 保留 5／5 個接線位置。10／10 個可判分目標命中，無漏連或誤連。其中 5 個接線目標都有位置。 | 10 個可判分目標中，命中 5 個 callback、漏 4 個、誤連 1 個。接線目標均無位置。 | 找到 5／5 個接線名稱所在行，無多餘命中。輸出為來源文字。 |
+| napari `_qt` | 保留 433／433 個接線位置。330 個可判分目標全部命中並附位置，無漏連或誤連。 | 330 個可判分目標全部命中，無漏連或誤連。接線目標均無位置。 | 找到 433／433 個接線名稱所在行，無多餘命中。輸出為來源文字。 |
+
+合成案例有 2 個目標超出判分範圍。CBM 將 `self.ik2fk(partI)` 經 `unique_name` 誤連至同名干擾方法。napari 有 103 個接線目標未判分。對 napari 的兩項圖工具，冷索引計時涵蓋完整 checkout，接線判分限於 `_qt`。ripgrep 的位置以 `connect` 名稱所在行為準，Graphify 的位置則以呼叫起點的行列為準。
+
+| 資料集 | Graphify 冷擷取 | CBM 冷索引 | Graphify MCP 單次查詢 | CBM CLI 單次查詢 | ripgrep 單次查詢 | CBM 批次關係查詢 | ripgrep 接線掃描 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 合成案例 | 0.840 s | 1.872 s | 0.007 s | 1.093 s | 0.020 s | 1.333 s | 0.117 s |
+| napari | 48.534 s | 4.757 s | 0.010 s | 1.071 s | 0.020 s | 1.334 s | 0.026 s |
+
+每個數字為同機單次 wall-clock 觀測，量測期間也執行倉庫驗證。單次查詢分別以 `menuHelp_triggered` 和 `QtViewer` 為搜尋詞。Graphify MCP 在初始化完成後計時。CBM CLI 和 ripgrep 計入程序啟動。三者的回傳內容不同，表中耗時反映各自的操作流程。
+
+**發行決策**：維持 Graphify 的可選試驗定位，CBM 以 Windows x64 設定範例供手動啟用。此次暫緩 CBM 安裝命令、離線套件、自動索引及預設啟用。原始使用者專案與其他平台仍待驗證。41 項 Node 測試、9 項 Python 測試、mock 模型工作區切換、Rust 格式與全工作區檢查及測試通過。嚴格 Clippy 仍有已記錄的 Web workspace fallback 錯誤。 [已知問題](../KNOWN_ISSUES.md#workspace-clippy-rejects-an-existing-web-workspace-fallback)
 
 本計畫使用既有插件與檢視契約。若實作需要改動 kernel、服務契約或協議，先依倉庫規則審查 ADR 0036 和 pivot plan，再另行決定變更範圍。

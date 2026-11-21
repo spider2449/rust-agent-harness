@@ -24,6 +24,7 @@ QUERY = (
     "RETURN a.qualified_name,a.file_path,type(r),b.qualified_name,b.file_path,properties(r)"
 )
 NAPARI_QUERY = QUERY.replace("RETURN", "WHERE a.file_path STARTS WITH 'src/napari/_qt/' RETURN")
+CBM_WINDOWS_SHA256 = "39f6a789cd858d7428561ac5afaefb9a47b018dcba0ad6fa41ae71a45e0ed656"
 
 
 class Source(ast.NodeVisitor):
@@ -74,7 +75,8 @@ class Source(ast.NodeVisitor):
                     if len(methods) == 1 and not methods[0].decorator_list:
                         expected = (f"{self.module}.{cls.name}.{arg.attr}", methods[0].lineno)
                         reason = None
-            self.sites.append(dict(line=node.lineno, column=node.col_offset, source=self.symbol,
+            self.sites.append(dict(line=node.lineno, column=node.col_offset,
+                                   search_line=node.func.end_lineno, source=self.symbol,
                                    signal=ast.unparse(node.func.value), expression=ast.unparse(arg) if arg else None,
                                    kind="callback", expected=expected, reason=reason))
         self.generic_visit(node)
@@ -130,10 +132,12 @@ def source_cases(root, napari):
     return sites, definitions, len(files)
 
 
-def run(command, *, env=None, cwd=None):
+def run(command, *, env=None, cwd=None, exit_codes=(0,)):
     start = perf_counter()
-    result = subprocess.run(command, env=env, cwd=cwd, check=True, stdout=subprocess.PIPE,
+    result = subprocess.run(command, env=env, cwd=cwd, stdout=subprocess.PIPE,
                             encoding="utf-8", timeout=600)
+    if result.returncode not in exit_codes:
+        result.check_returncode()
     return result.stdout, round(perf_counter() - start, 3)
 
 
@@ -169,7 +173,7 @@ async def graphify_query(graph_path, question):
                 return round(perf_counter() - start, 3)
 
 
-def graphify(root, stage, definitions, question):
+def graphify(root, stage, definitions, question, sites):
     from importlib.metadata import version
     actual = version("graphifyy")
     if actual != GRAPHIFY:
@@ -182,14 +186,24 @@ def graphify(root, stage, definitions, question):
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
 
     def location(entry):
-        match = re.fullmatch(r"L(\d+)(?:-L\d+)?", entry.get("source_location") or "")
+        match = re.fullmatch(r"L(\d+)(?::\d+|-L\d+)?", entry.get("source_location") or "")
         return file_name(root, entry.get("source_file")), int(match[1]) if match else None
 
     nodes = {node["id"]: node for node in graph["nodes"]}
+    positions = set()
+    for node in nodes.values():
+        if node.get("rah_connection", {}).get("version") == 1:
+            match = re.fullmatch(r"L(\d+):(\d+)", node["source_location"])
+            if match:
+                positions.add((file_name(root, node["source_file"]), int(match[1]), int(match[2]) - 1))
+    expected = {(site["file"], site["line"], site["column"]) for site in sites if site["kind"] == "callback"}
+    graph_edges = graph.get("edges", graph.get("links"))
+    owners = {edge["target"]: nodes[edge["source"]] for edge in graph_edges
+              if edge["relation"] in {"connection_site", "member_access_site"}}
     edges = []
-    for edge in graph["edges"] if "edges" in graph else graph["links"]:
+    for edge in graph_edges:
         source, target = nodes[edge["source"]], nodes[edge["target"]]
-        source_file, source_line = location(source)
+        source_file, source_line = location(owners.get(source["id"], source))
         caller = definitions.get((source_file, source_line))
         if caller is None:
             continue
@@ -198,10 +212,12 @@ def graphify(root, stage, definitions, question):
         context = edge.get("context")
         relation = "reads" if context == "property_read" else edge["relation"]
         edges.append(dict(source=caller, file=source_file, relation=relation, context=context,
-                          target=definitions.get((target_file, target_line), target["label"]),
+                          target=(f"{Path(target_file).stem}.{target['rah_member']}" if target.get("rah_member")
+                                  else definitions.get((target_file, target_line), target["label"])),
                           target_file=target_file, target_line=target_line,
                           line=edge_line if edge_file == source_file else None,
-                          expression=target["label"].strip(".()"),
+                          expression=(source["rah_connection"]["slot"] if edge["relation"] == "callback"
+                                      else target["label"].strip(".()")),
                           confidence=edge.get("confidence")))
     for node in nodes.values():
         file, line = location(node)
@@ -213,24 +229,40 @@ def graphify(root, stage, definitions, question):
     artifact_read_seconds = round(perf_counter() - start, 3)
     query_seconds = asyncio.run(graphify_query(graph_path, question))
     return edges, dict(version=actual, extract_seconds=elapsed, artifact_read_seconds=artifact_read_seconds,
-                       sample_query=question, sample_query_seconds=query_seconds)
+                       sample_query=question, sample_query_seconds=query_seconds,
+                       callback_locations_recorded=len(positions & expected),
+                       artifact_callback_locations=len(positions))
 
 
-def cbm(root, stage, binary, napari):
+def cbm(root, stage, binary, napari, question):
+    with binary.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if sys.platform == "win32" and digest != CBM_WINDOWS_SHA256:
+        raise ValueError("Unexpected CBM Windows binary SHA-256")
     actual, _ = run([str(binary), "--version"])
     if actual.strip() != f"codebase-memory-mcp {CBM}":
         raise ValueError(f"Unexpected CBM version {actual}")
-    stage.mkdir()
-    env = dict(os.environ, LOCALAPPDATA=str(stage), XDG_CACHE_HOME=str(stage))
+    cache, runtime = stage / "cache", stage / "runtime"
+    cache.mkdir(parents=True)
+    runtime.mkdir()
+    env = dict(os.environ, CBM_CACHE_DIR=str(cache), CBM_RUNTIME_DIR=str(runtime),
+               CBM_ALLOWED_ROOT=str(root))
     command = [str(binary), "cli", "--quiet"]
     project = "rah-navigation-baseline"
-    result, index_seconds = run(command + ["index_repository", "--repo-path", str(root),
+    for option in ("ui_enabled", "auto_index", "auto_watch", "watcher_enabled"):
+        run([str(binary), "config", "set", option, "false"], env=env, cwd=root)
+    try:
+        result, index_seconds = run(command + ["index_repository", "--repo-path", str(root),
                                            "--name", project, "--mode", "fast"], env=env)
-    if json.loads(result)["status"] != "indexed":
-        raise ValueError(result)
-    result, query_seconds = run(command + ["query_graph", "--project", project, "--query",
+        if json.loads(result)["status"] != "indexed":
+            raise ValueError(result)
+        _, sample_seconds = run(command + ["search_graph", "--project", project, "--query", question,
+                                            "--limit", "30", "--format", "json"], env=env, cwd=root)
+        result, query_seconds = run(command + ["query_graph", "--project", project, "--query",
                                            NAPARI_QUERY if napari else QUERY, "--format", "json",
                                            "--max-rows", "99998", "--max-output-tokens", "10000000"], env=env)
+    finally:
+        run([str(binary), "daemon", "stop"], env=env, cwd=root)
     response = json.loads(result)
     if response["truncated"] or response["has_more"] or response["total"] != len(response["rows"]):
         raise ValueError("Incomplete CBM query")
@@ -243,10 +275,40 @@ def cbm(root, stage, binary, napari):
                           target_file=file_name(root, target_file), line=detail.get("line"),
                           expression=detail.get("callee"), strategy=detail.get("strategy"),
                           confidence=detail.get("confidence")))
-    with binary.open("rb") as stream:
-        digest = hashlib.file_digest(stream, "sha256").hexdigest()
     return edges, dict(version=CBM, sha256=digest,
+                       sample_query=question, sample_query_seconds=sample_seconds,
                        index_seconds=index_seconds, query_seconds=query_seconds, queried_edges=len(edges))
+
+
+def source_match_lines(output):
+    """Find the line of the connect token, even when the dot starts earlier."""
+    matches = set()
+    for row in map(json.loads, output.splitlines()):
+        if row["type"] != "match":
+            continue
+        data = row["data"]
+        content = data["lines"]["text"].encode()
+        relative = Path(data["path"]["text"]).as_posix()
+        for match in data["submatches"]:
+            prefix = re.match(rb"\.\s*", content[match["start"]:])
+            name_start = match["start"] + prefix.end()
+            matches.add((relative, data["line_number"] + content.count(b"\n", 0, name_start)))
+    return matches
+
+
+def source_search(root, sites, napari, question):
+    """Measure lexical locations against the AST inventory without assigning targets."""
+    base = ["rg", "--no-config", "--no-ignore", "--json", "--glob", "*.py"]
+    directory = "src/napari/_qt" if napari else "."
+    output, seconds = run(base + ["--multiline", r"\.\s*connect\s*\(", directory],
+                          cwd=root, exit_codes=(0, 1))
+    _, sample_seconds = run(base + ["--fixed-strings", question, directory], cwd=root, exit_codes=(0, 1))
+    matches = source_match_lines(output)
+    expected = {(site["file"], site["search_line"]) for site in sites if site["kind"] == "callback"}
+    return dict(query_seconds=seconds, matching_lines=len(matches & expected),
+                sample_query=question, sample_query_seconds=sample_seconds,
+                expected_lines=len(expected), unmatched_lexical_lines=len(matches - expected),
+                missing_lines=sorted(expected - matches), target_links_emitted=0)
 
 
 def score(sites, edges):
@@ -261,7 +323,7 @@ def score(sites, edges):
         candidates = []
         for edge in by_scope[site["file"], site["source"]]:
             if site["kind"] == "callback":
-                if edge["relation"] not in ("CALL_REFERENCE", "USAGE"):
+                if edge["relation"] not in ("callback", "CALL_REFERENCE", "USAGE"):
                     continue
             elif site["kind"] == "calls":
                 if edge["relation"] not in ("CALLS", "calls"):
@@ -318,9 +380,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--napari", type=Path, help="Clean pinned napari checkout")
     parser.add_argument("--graphify", action="store_true", help="Use this Python's managed Graphify environment")
+    parser.add_argument("--source-search", action="store_true", help="Measure ripgrep on the same Python files")
     parser.add_argument("--cbm", type=Path, help="Absolute path to an independently verified CBM binary")
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="rah-navigation-") as tmp:
+    # CBM v0.12.1 requires a private cache and daemon rendezvous ancestry.
+    with tempfile.TemporaryDirectory(prefix="rah-navigation-", dir=Path.home() if args.cbm else None) as tmp:
         stage = Path(tmp)
         if args.napari:
             root = args.napari.resolve(strict=True)
@@ -337,13 +401,15 @@ def main():
                       callback_sites=sum(site["kind"] == "callback" for site in sites),
                       unscored=dict(Counter(site["reason"] for site in sites if site["reason"])),
                       source_scan_seconds=round(perf_counter() - start, 3), source=sites)
+        question = "QtViewer" if args.napari else "menuHelp_triggered"
         if args.graphify:
-            question = "QtViewer" if args.napari else "menuHelp_triggered"
-            edges, measurements = graphify(root, stage / "graphify", definitions, question)
+            edges, measurements = graphify(root, stage / "graphify", definitions, question, sites)
             report["graphify"] = dict(measurements, **score(sites, edges))
         if args.cbm:
-            edges, measurements = cbm(root, stage / "cbm", args.cbm.resolve(strict=True), bool(args.napari))
+            edges, measurements = cbm(root, stage / "cbm", args.cbm.resolve(strict=True), bool(args.napari), question)
             report["cbm"] = dict(measurements, **score(sites, edges))
+        if args.source_search:
+            report["source_search"] = source_search(root, sites, bool(args.napari), question)
         print(json.dumps(report, indent=2))
 
 

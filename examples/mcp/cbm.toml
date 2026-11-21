@@ -1,0 +1,25 @@
+# Replace the three absolute paths before use. Set the workspace with --root.
+[[plugin]]
+use = "policy-authority"
+config = { allow = ["read"], tools = { "mcp.cbm.search_graph" = "read", "mcp.cbm.trace_path" = "read", "mcp.cbm.get_code_snippet" = "read", "mcp.cbm.query_graph" = "read" } }
+
+[[plugin]]
+use = "session-jsonl"
+
+[[plugin]]
+use = "sandbox-process"
+config = { root = "." }
+
+[[plugin]]
+use = "tools-mcp"
+id = "mcp-cbm"
+config = { server = "cbm", program = "node", args = ['C:\rah\examples\mcp\cbm-readonly.mjs'], env = { RAH_CBM_BINARY = 'C:\rah\cbm\codebase-memory-mcp.exe', RAH_CBM_HOME = 'C:\Users\you\rah-cbm' }, call_timeout_ms = 20000, startup_timeout_ms = 15000, max_message_bytes = 65536, max_outstanding = 1, tools = { search_graph = "read", trace_path = "read", get_code_snippet = "read", query_graph = "read" } }
+
+[[plugin]]
+use = "model-mock"
+
+[[plugin]]
+use = "loop-react"
+
+[[plugin]]
+use = "frontend-cli"

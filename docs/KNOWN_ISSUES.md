@@ -12,6 +12,13 @@ On Windows on 2026-11-21, strict workspace Clippy failed on
 `Option::or_else` to inspect the saved folder list. The same expression is
 present at the starting revision `9910eef`.
 
+## Web DCC feature test needs Python on Windows
+
+On 2026-11-21, `dcc_switch_mounts_and_remembers_the_embedded_plugin`
+returned HTTP 400 while enabling Maya because the test process could not
+find `python.exe`. When running from a checkout without a bundled runtime,
+put an existing Python installation on the test process's PATH.
+
 ## Web API group startup test intermittently times out
 
 On Windows on 2026-11-20, `tools_http_instances_are_api_groups_and_only_one_is_connected`
@@ -91,6 +98,10 @@ after the frontend. The cause of the timing difference is unconfirmed.
 - **Qt wiring:** `released.connect(self.infoI.selSwCtl_trd)` and
   `triggered.connect(self.menuHelp_triggered)` do not link signals to slots.
   The reported ten connect-related edges point to connect method nodes instead.
+  Managed extraction now records individual connection sites and infers
+  supported direct and constructor-bound callback targets. Dynamic
+  receivers and other unsupported callback forms still have incomplete
+  target coverage.
 - **Indirect calls:** calls through instance attributes, including
   `self.ik2fk(partI)` and object chains involving `charI.partIs[...]`, are
   largely unresolved. The reported 254 calls concentrate on same-file

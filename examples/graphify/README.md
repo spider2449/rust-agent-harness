@@ -77,14 +77,20 @@ For the real tools, set `$cbm` to the absolute path of the verified Windows CBM
 `3ce2a1cb12d40fdaffc3dcf9fb6575320ad834ba`. Run from the repository root.
 
 ```powershell
-uvx --offline --from 'graphifyy[mcp]==0.9.107' python examples/graphify/navigation-baseline.py --graphify --cbm $cbm
-uvx --offline --from 'graphifyy[mcp]==0.9.107' python examples/graphify/navigation-baseline.py --graphify --cbm $cbm --napari $napari
+uvx --offline --from 'graphifyy[mcp]==0.9.107' python examples/graphify/navigation-baseline.py --graphify --cbm $cbm --source-search
+uvx --offline --from 'graphifyy[mcp]==0.9.107' python examples/graphify/navigation-baseline.py --graphify --cbm $cbm --source-search --napari $napari
 ```
 
 The report goes to stdout as JSON. The runner uses the managed extractor and
-CBM's fast index in a fresh temporary cache. Extraction, artifact reading,
-CBM indexing and CLI query each have separate wall-clock timings. Graphify also
-times one `query_graph` call through its stdio MCP server after initialization.
+CBM's fast index with a fresh cache and daemon rendezvous. Extraction, artifact
+reading, CBM indexing and the batch relationship query have separate
+wall-clock timings. For the same sample symbol, it times a warm Graphify MCP
+query, one CBM CLI symbol query and a fixed-string ripgrep search. The timings
+include different process overheads and the tools return different payloads.
+The ripgrep connection pass independently counts lexical lines with a
+`.connect(` match. Confirmed lexical lines use the AST's connect-token line,
+which can differ from the start of the receiver expression. Ripgrep emits
+zero target links.
 The napari source manifest selects tracked Python files under `src/napari/_qt/`.
 Each syntactic `.connect()` call is a candidate. The target denominator uses
 positional `self.method` callbacks with a unique undecorated method declared
@@ -98,7 +104,8 @@ A positionless edge can match the expected symbol at multiple sites. The
 report lists those sites together and counts no position hits for that edge.
 Graphify property flags and `property_read` context are measured separately
 from generic references. A target plus an explicit matching source line is
-required for a position hit.
+required for a position hit. The managed artifact's connection-location
+coverage is also counted independently of the resolved targets.
 
 ## Reading and using workspace artifacts
 
