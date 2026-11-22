@@ -480,15 +480,24 @@ async fn shutdown_disposes_in_reverse_activation_order_and_rejects_mounts() {
 async fn lifecycle_operations_inside_apply_or_dispose_are_rejected() {
     let kernel = Kernel::new();
     let outcomes = Log::default();
+    assert_eq!(kernel.handle().check_lifecycle_context(), Ok(()));
     let nested = {
         let outcomes = outcomes.clone();
         plugin(PluginManifest::new("nested", "1.0.0"), move |scope| {
             let handle = scope.kernel();
+            assert_eq!(
+                handle.check_lifecycle_context(),
+                Err(KernelError::Reentrant)
+            );
             let child = plugin(PluginManifest::new("child", "1.0.0"), |_| Ok(()));
             let result = futures::executor::block_on(handle.mount(child, MountOptions::default()));
             outcomes.push(format!("apply:{result:?}"));
             let outcomes = outcomes.clone();
             scope.on_dispose(move || async move {
+                assert_eq!(
+                    handle.check_lifecycle_context(),
+                    Err(KernelError::Reentrant)
+                );
                 let result = handle.unmount(&PluginId::new("other")).await;
                 outcomes.push(format!("dispose:{result:?}"));
             });

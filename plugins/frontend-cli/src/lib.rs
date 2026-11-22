@@ -758,7 +758,8 @@ where
             event = events.next() => event,
             (request, reply) = next_prompt(terminal.approvals) => {
                 let tool = request.request.call.name.as_str();
-                let approved = terminal.running.is_allowed(&request.request.session, tool)
+                let approved = (request.may_remember()
+                    && terminal.running.is_allowed(&request.request.session, tool))
                     || confirm(terminal, &request, &cancel).await?;
                 let _ = reply.send(approved);
                 continue;
@@ -1140,9 +1141,22 @@ mod tests {
         asked: &[(&str, PermissionLevel)],
         typed: &str,
     ) -> (String, Vec<bool>) {
+        let requests = asked
+            .iter()
+            .map(|(tool, permission)| approval(session, tool, *permission))
+            .collect();
+        run_turn_requests(running, session, requests, typed).await
+    }
+
+    async fn run_turn_requests(
+        running: &RunningTurn,
+        session: &SessionId,
+        asked: Vec<ApprovalRequest>,
+        typed: &str,
+    ) -> (String, Vec<bool>) {
         let mut replies = Vec::new();
         let mut answers = Vec::new();
-        for _ in asked {
+        for _ in &asked {
             let (reply, answer) = oneshot::channel();
             replies.push(reply);
             answers.push(answer);
@@ -1150,7 +1164,10 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let agent_loop = Arc::new(ToolCalls {
             session: session.clone(),
-            tools: asked.iter().map(|(tool, _)| (*tool).to_owned()).collect(),
+            tools: asked
+                .iter()
+                .map(|request| request.request.call.name.to_string())
+                .collect(),
             answers: Mutex::new(Some(answers)),
             seen: seen.clone(),
         });
@@ -1167,11 +1184,8 @@ mod tests {
 
         let (prompts, receiver) = mpsc::channel::<ApprovalPrompt>(asked.len().max(1));
         let mut approvals = Some(receiver);
-        for ((tool, permission), reply) in asked.iter().zip(replies) {
-            prompts
-                .send((approval(session, tool, *permission), reply))
-                .await
-                .unwrap();
+        for (request, reply) in asked.into_iter().zip(replies) {
+            prompts.send((request, reply)).await.unwrap();
         }
 
         let mut out = Vec::new();
@@ -1377,6 +1391,32 @@ mod tests {
 
     const WRITE: PermissionLevel = PermissionLevel::Write;
     const EXECUTE: PermissionLevel = PermissionLevel::Execute;
+
+    #[tokio::test]
+    async fn remembered_approvals_require_current_eligibility() {
+        let running = RunningTurn::default();
+        let session = SessionId::new();
+        let tool = "repo.create-file";
+        let request = |level| {
+            let mut request = approval(&session, tool, WRITE);
+            request.level = level;
+            request
+        };
+        let (shown, answers) = run_turn_requests(
+            &running,
+            &session,
+            vec![
+                request(Some(WRITE)),
+                request(Some(EXECUTE)),
+                request(None),
+                request(Some(WRITE)),
+            ],
+            "a\nn\nn\n",
+        )
+        .await;
+        assert_eq!(answers, [true, false, false, true], "{shown}");
+        assert_eq!(shown.matches("[approve]").count(), 3, "{shown}");
+    }
 
     #[tokio::test]
     async fn always_allows_a_tool_for_the_session_and_asks_about_nothing_else() {

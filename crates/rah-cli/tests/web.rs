@@ -1475,6 +1475,48 @@ async fn several_repositories_in_one_workspace_are_shown_each() {
 }
 
 #[tokio::test]
+async fn the_workspace_folder_limit_includes_the_active_root() {
+    use reqwest::Method;
+
+    let web = start("web-folder-limit", |_| {}).await;
+    let root = web.dir.workspace();
+    let folders: Vec<_> = (0..32)
+        .map(|n| {
+            let path = web.dir.0.join(format!("folder-{n}"));
+            std::fs::create_dir(&path).unwrap();
+            path
+        })
+        .collect();
+    let update = |body: Value| web.request(Method::PUT, "/api/workspace").json(&body);
+    let (status, accepted) = web
+        .status(update(json!({ "root": root, "folders": &folders[..31] })))
+        .await;
+    assert_eq!(status, 200, "{accepted}");
+    let saved = accepted["workspace"].clone();
+    let saved_paths: Vec<_> = saved["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|folder| folder["path"].clone())
+        .collect();
+    assert_eq!(saved_paths.len(), 32);
+    assert_eq!(saved_paths[0], saved["root"]);
+
+    let (status, rejected) = web
+        .status(update(json!({ "root": root, "folders": folders })))
+        .await;
+    assert_eq!(status, 400, "{rejected}");
+    assert_eq!(web.json(web.get("/api/workspace")).await, saved);
+
+    let (status, preferences) = web
+        .status(web.request(Method::PUT, "/api/preferences").json(&json!({
+            "recent_workspaces": [{ "folders": saved_paths, "root": saved["root"] }],
+        })))
+        .await;
+    assert_eq!(status, 200, "{preferences}");
+}
+
+#[tokio::test]
 async fn a_workspace_holds_several_folders_and_one_is_active() {
     use reqwest::Method;
     let web = start("web-folders", |_| {}).await;

@@ -625,6 +625,118 @@ async fn a_workspace_change_that_fails_moves_no_plugin() {
 }
 
 #[tokio::test]
+async fn a_dropped_workspace_switch_completes_or_rolls_back() {
+    use rah_api::{
+        agent_loop::{OpenTurnError, open_turn_history},
+        sandbox::SANDBOX,
+    };
+    use tokio::{sync::Notify, time::timeout};
+
+    struct PausedTools {
+        manifest: PluginManifest,
+        target: std::path::PathBuf,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl Plugin for PausedTools {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+            if let Some(root) = scope.config()["root"].as_str()
+                && tokio::fs::canonicalize(root).await? == self.target
+            {
+                self.entered.notify_one();
+                self.release.notified().await;
+                if self.fail {
+                    return Err("injected workspace switch failure".into());
+                }
+            }
+            Ok(())
+        }
+    }
+
+    for fail in [false, true] {
+        timeout(std::time::Duration::from_secs(10), async {
+            let dir = TempDir::new("workspace-drop");
+            let kernel = kernel(&headless(&dir)).await;
+            let handle = kernel.handle();
+            let admin = handle.get(ADMIN).unwrap();
+            let sessions = handle.get(SESSION).unwrap();
+            let old_session = sessions.create().await.unwrap();
+            let old = handle.get(SANDBOX).unwrap().root().unwrap();
+            let other = dir.0.join("other");
+            std::fs::create_dir(&other).unwrap();
+            let target = tokio::fs::canonicalize(&other).await.unwrap();
+            let active_root = || async {
+                let root = handle.get(SANDBOX).unwrap().root().unwrap();
+                tokio::fs::canonicalize(root).await.unwrap()
+            };
+            let entered = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let id = PluginId::new("tools-builtin");
+            kernel.unmount(&id).await.unwrap();
+            kernel
+                .mount(
+                    Arc::new(PausedTools {
+                        manifest: PluginManifest::new(id.clone(), "1"),
+                        target: target.clone(),
+                        entered: entered.clone(),
+                        release: release.clone(),
+                        fail,
+                    }),
+                    MountOptions::default(),
+                )
+                .await
+                .unwrap();
+
+            let mut switching = Box::pin(admin.set_workspace(&other));
+            tokio::select! {
+                () = entered.notified() => {}
+                result = &mut switching => panic!("switch ended before the barrier: {result:?}"),
+            }
+            assert_eq!(active_root().await, target);
+            drop(switching);
+            release.notify_one();
+
+            loop {
+                match open_turn_history(&handle, sessions.as_ref(), &old_session.id).await {
+                    Err(OpenTurnError::Switching) => tokio::task::yield_now().await,
+                    Err(OpenTurnError::WrongWorkspace(_)) if !fail => break,
+                    Ok(_) if fail => break,
+                    Err(error) => panic!("workspace did not settle: {error}"),
+                    Ok(_) => panic!("switch retained the old workspace"),
+                }
+            }
+            let expected = if fail {
+                tokio::fs::canonicalize(old).await.unwrap()
+            } else {
+                target
+            };
+            assert_eq!(active_root().await, expected);
+            for id in [id, PluginId::new("sandbox-process")] {
+                let instance = admin.instance(&id).unwrap();
+                let root = instance.config["root"].as_str().unwrap();
+                assert_eq!(tokio::fs::canonicalize(root).await.unwrap(), expected);
+            }
+            let current = sessions.create().await.unwrap();
+            assert!(
+                open_turn_history(&handle, sessions.as_ref(), &current.id)
+                    .await
+                    .is_ok()
+            );
+            kernel.shutdown().await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn a_delegate_timeout_withdraws_the_childs_pending_approval() {
     use std::time::Duration;
     let dir = TempDir::new("delegate-deadline");

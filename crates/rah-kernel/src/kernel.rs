@@ -247,6 +247,15 @@ pub struct KernelHandle {
 }
 
 impl KernelHandle {
+    /// Check before handing a lifecycle operation off to another task.
+    /// The task-local reentrancy guard does not follow a spawned task.
+    pub fn check_lifecycle_context(&self) -> Result<(), KernelError> {
+        if in_lifecycle() {
+            return Err(KernelError::Reentrant);
+        }
+        Ok(())
+    }
+
     pub(crate) fn from_inner(inner: &Arc<Inner>) -> Self {
         Self {
             inner: Arc::downgrade(inner),

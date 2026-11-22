@@ -18,6 +18,7 @@
 
 use std::{
     collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -32,7 +33,7 @@ use rah_protocol::{
     ForkPoint, SessionEntry, SessionId, SessionInfo, SessionRecord, normalize_title,
 };
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncWriteExt, sync::Mutex};
+use tokio::sync::Mutex;
 
 const FORMAT_VERSION: u32 = 1;
 const MAX_FORK_DEPTH: usize = 64;
@@ -162,13 +163,6 @@ impl JsonlSessions {
     pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
         self.workspace = Some(workspace.into());
         self
-    }
-
-    fn current_workspace(&self) -> Option<String> {
-        self.workspace.clone().or_else(|| {
-            let root = self.events.as_ref()?.get(SANDBOX)?.root()?;
-            Some(root.display().to_string())
-        })
     }
 
     fn path(&self, session: &SessionId) -> PathBuf {
@@ -426,36 +420,38 @@ impl JsonlSessions {
         }
         Ok(ids)
     }
+}
 
-    async fn write_new(&self, info: &SessionInfo) -> Result<(), SessionError> {
-        let header = Line::Header {
-            version: FORMAT_VERSION,
-            session: info.id.clone(),
-            parent: info.parent.clone(),
-            created: info.created,
-            workspace: info.workspace.clone(),
-        };
-        let mut line =
-            serde_json::to_string(&header).map_err(|e| SessionError::Io(e.to_string()))?;
-        line.push('\n');
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(self.path(&info.id))
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))?;
-        file.write_all(line.as_bytes())
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))?;
-        // Also waits for the write, which `sync_data` alone does not
-        // promise for a tokio file.
-        file.flush()
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))?;
-        file.sync_data()
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))
+/// Publishes a synced header without replacing an existing session.
+fn write_new(dir: &Path, info: &SessionInfo) -> Result<(), SessionError> {
+    let header = Line::Header {
+        version: FORMAT_VERSION,
+        session: info.id.clone(),
+        parent: info.parent.clone(),
+        created: info.created,
+        workspace: info.workspace.clone(),
+    };
+    let mut line = serde_json::to_vec(&header).map_err(|e| SessionError::Io(e.to_string()))?;
+    line.push(b'\n');
+    let mut staging = tempfile::Builder::new();
+    staging.prefix(".session-").suffix(".tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Match the original OpenOptions creation mode, filtered by umask.
+        staging.permissions(std::fs::Permissions::from_mode(0o666));
     }
+    let mut staged = staging
+        .tempfile_in(dir)
+        .map_err(|e| SessionError::Io(e.to_string()))?;
+    staged
+        .write_all(&line)
+        .and_then(|()| staged.as_file().sync_all())
+        .map_err(|e| SessionError::Io(e.to_string()))?;
+    staged
+        .persist_noclobber(path_in(dir, &info.id))
+        .map(drop)
+        .map_err(|e| SessionError::Io(e.to_string()))
 }
 
 fn now() -> u64 {
@@ -477,14 +473,24 @@ fn new_info(parent: Option<ForkPoint>, workspace: Option<String>) -> SessionInfo
     }
 }
 
+fn current_workspace(workspace: Option<String>, kernel: Option<&KernelHandle>) -> Option<String> {
+    workspace.or_else(|| {
+        let root = kernel?.get(SANDBOX)?.root()?;
+        Some(root.display().to_string())
+    })
+}
+
 #[async_trait]
 impl SessionLog for JsonlSessions {
     async fn create(&self) -> Result<SessionInfo, SessionError> {
-        let _guard = self.next_seq.lock().await;
-        let _writer = self.writer_lock().await?;
-        let info = new_info(None, self.current_workspace());
-        self.write_new(&info).await?;
-        Ok(info)
+        let workspace = self.workspace.clone();
+        let kernel = self.events.clone();
+        self.exclusive(move |_, dir| {
+            let info = new_info(None, current_workspace(workspace, kernel.as_ref()));
+            write_new(dir, &info)?;
+            Ok(info)
+        })
+        .await
     }
 
     async fn append(&self, session: &SessionId, entry: SessionEntry) -> Result<u64, SessionError> {
@@ -547,8 +553,8 @@ impl SessionLog for JsonlSessions {
     }
 
     async fn fork(&self, session: &SessionId, at: u64) -> Result<SessionInfo, SessionError> {
-        let _guard = self.next_seq.lock().await;
-        let _writer = self.writer_lock().await?;
+        let guard = self.next_seq.clone().lock_owned().await;
+        let writer = self.writer_lock().await?;
         let history = self.history(session).await?;
         if history.depth >= MAX_FORK_DEPTH {
             return Err(SessionError::ForkDepthLimit(MAX_FORK_DEPTH));
@@ -567,10 +573,19 @@ impl SessionLog for JsonlSessions {
                 session: session.clone(),
                 at,
             }),
-            history.info.workspace.or_else(|| self.current_workspace()),
+            history
+                .info
+                .workspace
+                .or_else(|| current_workspace(self.workspace.clone(), self.events.as_ref())),
         );
-        self.write_new(&info).await?;
-        Ok(info)
+        let dir = self.dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let (_guard, _writer) = (guard, writer);
+            write_new(&dir, &info)?;
+            Ok(info)
+        })
+        .await
+        .map_err(|error| SessionError::Io(error.to_string()))?
     }
 
     /// Lists without the write lock, so a long list never holds up a
@@ -799,7 +814,7 @@ mod tests {
 
         // An older version accepted this child. Keep its history accessible.
         let legacy = new_info(Some(ForkPoint { session: id, at: 0 }), None);
-        store.write_new(&legacy).await.unwrap();
+        write_new(&store.dir, &legacy).unwrap();
         assert_eq!(store.append(&legacy.id, started("saved")).await.unwrap(), 1);
         assert_eq!(
             inputs(&store.read(&legacy.id).await.unwrap()),
@@ -919,6 +934,54 @@ mod tests {
             log.read(&info.id).await,
             Err(SessionError::Corrupt { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn publishing_a_header_preserves_an_existing_session() {
+        let dir = TempDir::new("header-collision");
+        let log = JsonlSessions::new(dir.0.clone());
+        let mut info = log.create().await.unwrap();
+        let path = log.path(&info.id);
+        let original = std::fs::read(&path).unwrap();
+        info.workspace = Some("other workspace".into());
+        assert!(matches!(write_new(&dir.0, &info), Err(SessionError::Io(_))));
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        assert!(std::fs::read_dir(&dir.0).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_none_or(|ext| ext != "tmp")
+        }));
+        assert_eq!(log.list().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_publication_keeps_the_writer_lock_until_the_header_is_complete() {
+        let dir = TempDir::new("header-cancelled");
+        let log = JsonlSessions::new(dir.0.clone());
+        let info = new_info(None, None);
+        let id = info.id.clone();
+        let (entered, running) = tokio::sync::oneshot::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        let mut publishing = Box::pin(log.exclusive(move |_, dir| {
+            let _ = entered.send(());
+            release
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            write_new(dir, &info)
+        }));
+        tokio::select! {
+            result = running => result.unwrap(),
+            result = &mut publishing => panic!("publication finished before the barrier: {result:?}"),
+        }
+        drop(publishing);
+        assert!(!log.path(&id).exists());
+        let locked = log.next_seq.try_lock().is_err();
+        resume.send(()).unwrap();
+        assert!(locked);
+        assert!(log.read(&id).await.unwrap().is_empty());
+        assert_eq!(log.list().await.unwrap()[0].id, id);
     }
 
     #[tokio::test]

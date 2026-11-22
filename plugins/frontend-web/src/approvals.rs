@@ -135,7 +135,8 @@ impl Approvals {
     pub async fn ask(&self, request: ApprovalRequest) -> Option<bool> {
         let call = &request.request.call;
         let key = (request.request.session.to_string(), call.name.to_string());
-        if self.remembered().contains(&key) {
+        let may_remember = request.may_remember();
+        if may_remember && self.remembered().contains(&key) {
             return Some(true);
         }
         if self.clients.load(Ordering::SeqCst) == 0 {
@@ -145,7 +146,6 @@ impl Approvals {
         let permission = request.request.definition.permission;
         // A call judged at `execute`, or at no known level, is asked about
         // every time (ADR 0074).
-        let may_remember = request.may_remember();
         let command = command_rule(call.name.as_str(), &call.input.0);
         let notice = json!({
             "type": "approval_required",
@@ -278,6 +278,28 @@ mod tests {
         let id = notice["id"].as_str().unwrap().to_owned();
         assert!(approvals.answer(&id, approve, always, false).is_some());
         (notice, asking.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn remembered_approvals_require_current_eligibility() {
+        let approvals = Arc::new(Approvals::new(Duration::from_secs(5)));
+        let session = SessionId::new();
+        let eligible = request_for(
+            &session,
+            "repo.create-file",
+            PermissionLevel::Write,
+            "write",
+        );
+        answered(&approvals, eligible.clone(), true, true).await;
+        for level in [Some(PermissionLevel::Execute), None] {
+            let mut request = eligible.clone();
+            request.level = level;
+            assert_eq!(approvals.ask(request.clone()).await, None);
+            let (notice, answer) = answered(&approvals, request, false, false).await;
+            assert_eq!(notice["may_remember"], false);
+            assert_eq!(answer, Some(false));
+        }
+        assert_eq!(approvals.ask(eligible).await, Some(true));
     }
 
     #[tokio::test]

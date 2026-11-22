@@ -136,6 +136,8 @@ pub(crate) const POLICY_KINDS: [&str; 1] = ["policy-authority"];
 pub struct DistributionPlugin {
     manifest: PluginManifest,
     registry: Arc<Registry>,
+    // Retain a failed consistency check across a restart of the distribution.
+    workspace: Arc<tokio::sync::RwLock<bool>>,
     data_home: Option<PathBuf>,
     file: Option<PathBuf>,
 }
@@ -146,6 +148,7 @@ impl DistributionPlugin {
             manifest: PluginManifest::new(DISTRIBUTION_PLUGIN, env!("CARGO_PKG_VERSION"))
                 .provides(["admin", TOOL_GUARD_SERVICE, "workspace-turns"]),
             registry,
+            workspace: Arc::new(tokio::sync::RwLock::new(true)),
             data_home: None,
             file: None,
         }
@@ -172,13 +175,14 @@ impl Plugin for DistributionPlugin {
     }
 
     async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
-        let workspace = Arc::new(tokio::sync::RwLock::new(true));
+        let workspace = self.workspace.clone();
         scope.provide(
             WORKSPACE_TURNS,
             Arc::new(WorkspaceTurns::new(workspace.clone())),
         )?;
         let admin = Admin {
             workspace,
+            spawner: scope.spawner(),
             kernel: scope.kernel(),
             registry: self.registry.clone(),
             own: scope.id().clone(),
@@ -192,8 +196,10 @@ impl Plugin for DistributionPlugin {
     }
 }
 
+#[derive(Clone)]
 struct Admin {
     workspace: Arc<tokio::sync::RwLock<bool>>,
+    spawner: rah_api::kernel::Spawner,
     kernel: KernelHandle,
     registry: Arc<Registry>,
     own: PluginId,
@@ -234,6 +240,81 @@ impl Admin {
             instances.retain(|(instance, _)| instance.as_str() == id);
         }
         instances
+    }
+
+    async fn switch_workspace(
+        &self,
+        root: PathBuf,
+        mut consistent: tokio::sync::OwnedRwLockWriteGuard<bool>,
+    ) -> Result<Workspace, AdminError> {
+        let value = Value::String(root.display().to_string());
+        // Every mounted instance of a workspace kind, sandbox first.
+        let targets: Vec<(PluginId, Record)> = WORKSPACE_PLUGINS
+            .iter()
+            .flat_map(|kind| {
+                self.registry
+                    .lock()
+                    .iter()
+                    .filter(|(_, record)| record.kind == *kind)
+                    .map(|(id, record)| (id.clone(), record.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if targets.iter().all(|(_, record)| record.stopped) {
+            return Err(failed("no plugin that works in a workspace is mounted"));
+        }
+        let rooted = |config: &Value| {
+            let mut config = match config {
+                Value::Object(map) => map.clone(),
+                _ => serde_json::Map::new(),
+            };
+            config.insert("root".to_owned(), value.clone());
+            Value::Object(config)
+        };
+        // The running plugins move together or not at all: programs must
+        // not run in one folder while the file tools work in another.
+        let previous = *consistent;
+        *consistent = false;
+        let mut plugins = Vec::new();
+        let mut moved: Vec<(&PluginId, &Value)> = Vec::new();
+        for (id, record) in targets.iter().filter(|(_, record)| !record.stopped) {
+            let configured = self.configure(id, rooted(&record.config)).await;
+            if configured.is_ok() {
+                moved.push((id, &record.config));
+            }
+            match configured.and_then(|status| match status {
+                PluginStatus::Failed { .. } => Err(failed(format!("{status:?}"))),
+                status => Ok(status),
+            }) {
+                Ok(status) => {
+                    plugins.push((id.clone(), status));
+                }
+                Err(error) => {
+                    let mut kept = true;
+                    for (id, config) in moved.into_iter().rev() {
+                        kept &= self
+                            .configure(id, config.clone())
+                            .await
+                            .is_ok_and(|status| !matches!(status, PluginStatus::Failed { .. }));
+                    }
+                    *consistent = previous && kept;
+                    let outcome = if kept {
+                        "the workspace was not changed"
+                    } else {
+                        "and not every plugin could be moved back; restart rah"
+                    };
+                    return Err(failed(format!("`{id}`: {error}; {outcome}")));
+                }
+            }
+        }
+        // A stopped one takes the new root when it is started again.
+        for (id, record) in targets.iter().filter(|(_, record)| record.stopped) {
+            if let Some(stored) = self.registry.lock().get_mut(id) {
+                stored.config = rooted(&record.config);
+            }
+        }
+        *consistent = true;
+        Ok(Workspace { root, plugins })
     }
 
     fn unlocked(&self, id: &PluginId) -> Result<(), AdminError> {
@@ -477,84 +558,26 @@ impl PluginAdmin for Admin {
     }
 
     async fn set_workspace(&self, root: &Path) -> Result<Workspace, AdminError> {
+        self.kernel.check_lifecycle_context().map_err(failed)?;
         let canonical = tokio::fs::canonicalize(root)
             .await
             .map_err(|error| failed(format!("`{}`: {error}", root.display())))?;
         if !canonical.is_dir() {
             return Err(failed(format!("`{}` is not a directory", root.display())));
         }
-        let mut consistent = self.workspace.try_write().map_err(|_| {
+        let consistent = self.workspace.clone().try_write_owned().map_err(|_| {
             failed("a turn or workspace switch is running; try again when it finishes")
         })?;
         let root = plain_path(canonical);
-        let value = Value::String(root.display().to_string());
-        // Every mounted instance of a workspace kind, sandbox first.
-        let targets: Vec<(PluginId, Record)> = WORKSPACE_PLUGINS
-            .iter()
-            .flat_map(|kind| {
-                self.registry
-                    .lock()
-                    .iter()
-                    .filter(|(_, record)| record.kind == *kind)
-                    .map(|(id, record)| (id.clone(), record.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        if targets.iter().all(|(_, record)| record.stopped) {
-            return Err(failed("no plugin that works in a workspace is mounted"));
-        }
-        let rooted = |config: &Value| {
-            let mut config = match config {
-                Value::Object(map) => map.clone(),
-                _ => serde_json::Map::new(),
-            };
-            config.insert("root".to_owned(), value.clone());
-            Value::Object(config)
-        };
-        // The running plugins move together or not at all: programs must
-        // not run in one folder while the file tools work in another.
-        let previous = *consistent;
-        *consistent = false;
-        let mut plugins = Vec::new();
-        let mut moved: Vec<(&PluginId, &Value)> = Vec::new();
-        for (id, record) in targets.iter().filter(|(_, record)| !record.stopped) {
-            let configured = self.configure(id, rooted(&record.config)).await;
-            if configured.is_ok() {
-                moved.push((id, &record.config));
-            }
-            match configured.and_then(|status| match status {
-                PluginStatus::Failed { .. } => Err(failed(format!("{status:?}"))),
-                status => Ok(status),
-            }) {
-                Ok(status) => {
-                    plugins.push((id.clone(), status));
-                }
-                Err(error) => {
-                    let mut kept = true;
-                    for (id, config) in moved.into_iter().rev() {
-                        kept &= self
-                            .configure(id, config.clone())
-                            .await
-                            .is_ok_and(|status| !matches!(status, PluginStatus::Failed { .. }));
-                    }
-                    *consistent = previous && kept;
-                    let outcome = if kept {
-                        "the workspace was not changed"
-                    } else {
-                        "and not every plugin could be moved back; restart rah"
-                    };
-                    return Err(failed(format!("`{id}`: {error}; {outcome}")));
-                }
-            }
-        }
-        // A stopped one takes the new root when it is started again.
-        for (id, record) in targets.iter().filter(|(_, record)| record.stopped) {
-            if let Some(stored) = self.registry.lock().get_mut(id) {
-                stored.config = rooted(&record.config);
-            }
-        }
-        *consistent = true;
-        Ok(Workspace { root, plugins })
+        let admin = self.clone();
+        let (answer, result) = tokio::sync::oneshot::channel();
+        // Dropping the caller must leave the task holding the lease through rollback or commit.
+        self.spawner.spawn(async move {
+            let _ = answer.send(admin.switch_workspace(root, consistent).await);
+        });
+        result
+            .await
+            .map_err(|_| failed("the distribution stopped"))?
     }
 
     fn features(&self) -> Vec<FeatureInfo> {

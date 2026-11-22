@@ -2909,6 +2909,7 @@ dependencies = [
  "rah-protocol",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

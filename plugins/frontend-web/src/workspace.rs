@@ -227,6 +227,21 @@ pub(crate) async fn set(
     State(shared): State<AppState>,
     Json(request): Json<SetWorkspace>,
 ) -> ApiResult {
+    let (answer, result) = tokio::sync::oneshot::channel();
+    let workspace = shared.clone();
+    // Keep the root change and its storage write ordered even if the client disconnects.
+    shared.spawner.spawn(async move {
+        let _ = answer.send(set_owned(workspace, request).await);
+    });
+    result.await.map_err(|_| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the frontend stopped".into(),
+        )
+    })?
+}
+
+async fn set_owned(shared: AppState, request: SetWorkspace) -> ApiResult {
     let root = request.root.trim();
     if root.is_empty() {
         return Err(bad_request("the folder is empty".into()));
@@ -264,6 +279,11 @@ pub(crate) async fn set(
             }
             if !next.contains(&root) {
                 next.folders.insert(0, root.clone());
+            }
+            if next.folders.len() > MAX_FOLDERS {
+                return Err(bad_request(format!(
+                    "a workspace holds at most {MAX_FOLDERS} folders"
+                )));
             }
             next
         }
@@ -438,6 +458,155 @@ fn roots() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use rah_api::{
+        CancellationToken, Kernel, MountOptions, Plugin, PluginError, PluginManifest, Scope,
+        async_trait,
+        host::NoticeOnce,
+        sandbox::{ExecEnv, ExecError, ExecOutput, ProgramSpec},
+        storage::{KvStore, MemoryStore, StorageError},
+    };
+    use tokio::sync::Notify;
+
+    struct Root(PathBuf);
+
+    #[async_trait]
+    impl ExecEnv for Root {
+        fn root(&self) -> Option<PathBuf> {
+            Some(self.0.clone())
+        }
+
+        async fn run(&self, _: ProgramSpec, _: CancellationToken) -> Result<ExecOutput, ExecError> {
+            Err(ExecError::InvalidSpec("test only provides a root".into()))
+        }
+    }
+
+    #[derive(Default)]
+    struct PausedStorage {
+        memory: MemoryStore,
+        entered: Notify,
+        release: Notify,
+        saved: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl KvStore for PausedStorage {
+        async fn get(&self, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+            self.memory.get(namespace, key).await
+        }
+
+        async fn put(&self, namespace: &str, key: &str, bytes: &[u8]) -> Result<(), StorageError> {
+            let folders: Folders = serde_json::from_slice(bytes).unwrap();
+            let name = folders.name.unwrap();
+            if name == "first" {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            self.memory.put(namespace, key, bytes).await?;
+            self.saved.lock().unwrap().push(name);
+            Ok(())
+        }
+
+        async fn delete(&self, namespace: &str, key: &str) -> Result<bool, StorageError> {
+            self.memory.delete(namespace, key).await
+        }
+
+        async fn list(&self, namespace: &str, prefix: &str) -> Result<Vec<String>, StorageError> {
+            self.memory.list(namespace, prefix).await
+        }
+    }
+
+    struct WorkspaceServices {
+        manifest: PluginManifest,
+        root: PathBuf,
+        storage: Arc<PausedStorage>,
+        spawner: Mutex<Option<rah_api::kernel::Spawner>>,
+    }
+
+    #[async_trait]
+    impl Plugin for WorkspaceServices {
+        fn manifest(&self) -> &PluginManifest {
+            &self.manifest
+        }
+
+        async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+            scope.provide(
+                SANDBOX,
+                Arc::new(Root(self.root.clone())) as Arc<dyn ExecEnv>,
+            )?;
+            scope.provide(STORAGE, self.storage.clone() as Arc<dyn KvStore>)?;
+            *self.spawner.lock().unwrap() = Some(scope.spawner());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dropped_workspace_request_finishes_saving_before_the_next_update() {
+        let root = std::env::current_dir().unwrap();
+        let kernel = Kernel::new();
+        let services = Arc::new(WorkspaceServices {
+            manifest: PluginManifest::new("workspace-test", "1").provides(["sandbox", "storage"]),
+            root: root.clone(),
+            storage: Arc::new(PausedStorage::default()),
+            spawner: Mutex::new(None),
+        });
+        kernel
+            .mount(services.clone(), MountOptions::default())
+            .await
+            .unwrap();
+        let spawner = services.spawner.lock().unwrap().take().unwrap();
+        let id = services.manifest.id.clone();
+        let shared = Arc::new(Shared {
+            id: id.clone(),
+            kernel: kernel.handle(),
+            token: String::new(),
+            hosts: Vec::new(),
+            approvals: crate::Approvals::new(std::time::Duration::from_secs(1)),
+            stop: spawner.cancellation(),
+            spawner,
+            notices: NoticeOnce::new(kernel.handle(), id.clone()),
+            workspace_switch: tokio::sync::Mutex::new(()),
+            folders: Mutex::new(None),
+        });
+        let update = |name: &str| {
+            let root = root.display().to_string();
+            set(
+                State(shared.clone()),
+                Json(SetWorkspace {
+                    root: root.clone(),
+                    folders: Some(vec![root]),
+                    name: Some(name.into()),
+                }),
+            )
+        };
+        let mut first = Box::pin(update("first"));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::select! {
+                () = services.storage.entered.notified() => {},
+                _ = &mut first => panic!("the request ended before storage was released"),
+            }
+            drop(first);
+            assert!(shared.workspace_switch.try_lock().is_err());
+            let mut second = Box::pin(update("second"));
+            assert!(futures::poll!(&mut second).is_pending());
+            services.storage.release.notify_one();
+            assert!(second.await.is_ok());
+        })
+        .await
+        .unwrap();
+        assert_eq!(*services.storage.saved.lock().unwrap(), ["first", "second"]);
+        let bytes = services
+            .storage
+            .get(id.as_str(), STORED)
+            .await
+            .unwrap()
+            .unwrap();
+        let saved: Folders = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved.name.as_deref(), Some("second"));
+        assert_eq!(saved.folders, [saved.root.unwrap()]);
+        kernel.shutdown().await.unwrap();
+    }
 
     fn folders(name: Option<&str>, paths: &[&str]) -> Folders {
         Folders {

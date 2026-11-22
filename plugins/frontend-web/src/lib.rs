@@ -213,6 +213,7 @@ pub(crate) struct Shared {
     pub approvals: Approvals,
     /// Cancelled when the plugin scope is disposed.
     pub stop: CancellationToken,
+    pub spawner: rah_api::kernel::Spawner,
     /// Notices about changes that hold only until the next start, once per
     /// reason.
     pub notices: rah_api::host::NoticeOnce,
@@ -272,13 +273,15 @@ impl Plugin for WebFrontendPlugin {
             .local_addr()
             .map_err(|error| format!("cannot read the listening address: {error}"))?;
         let timeout = Duration::from_secs(config.approval_timeout_secs.unwrap_or(300).max(1));
+        let spawner = scope.spawner();
         let shared = Arc::new(Shared {
             id: scope.id().clone(),
             kernel: scope.kernel(),
             token: access::new_token(),
             hosts: access::allowed_hosts(address),
             approvals: Approvals::new(timeout),
-            stop: scope.spawner().cancellation(),
+            stop: spawner.cancellation(),
+            spawner,
             notices: rah_api::host::NoticeOnce::new(scope.kernel(), scope.id().clone()),
             workspace_switch: tokio::sync::Mutex::new(()),
             folders: std::sync::Mutex::new(None),
