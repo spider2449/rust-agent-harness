@@ -158,6 +158,7 @@ impl Tokens {
     /// Adds `other`'s counts.
     fn sum(&mut self, other: &Tokens) {
         self.add(&ModelUsage {
+            context_window_tokens: None,
             input_tokens: other.input_tokens,
             output_tokens: other.output_tokens,
             cached_input_tokens: other.cached_input_tokens,

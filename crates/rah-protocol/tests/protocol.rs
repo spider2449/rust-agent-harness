@@ -163,6 +163,7 @@ fn tool_input_preserves_json_value_kinds() {
 #[test]
 fn usage_omits_unknown_counts_on_the_wire() {
     let usage = ModelUsage {
+        context_window_tokens: None,
         input_tokens: Some(12),
         output_tokens: None,
         cached_input_tokens: Some(4),

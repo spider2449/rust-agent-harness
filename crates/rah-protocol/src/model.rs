@@ -67,6 +67,9 @@ pub enum ModelEvent {
 /// what it reports; a missing count is `None`, never zero.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModelUsage {
+    /// Effective context capacity of the served model for this request, in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
     /// Input tokens, including cached ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,

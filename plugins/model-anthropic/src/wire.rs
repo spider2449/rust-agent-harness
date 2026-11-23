@@ -312,6 +312,7 @@ impl Response {
         .filter_map(count)
         .reduce(u64::saturating_add);
         let usage = ModelUsage {
+            context_window_tokens: None,
             input_tokens: input,
             output_tokens: count("output_tokens"),
             cached_input_tokens: count("cache_read_input_tokens"),

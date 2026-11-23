@@ -200,6 +200,7 @@ fn estimated_usage(request: &ModelRequest, events: &[ModelEvent]) -> ModelUsage 
         })
         .sum();
     ModelUsage {
+        context_window_tokens: None,
         input_tokens: Some(input.div_ceil(4) as u64),
         output_tokens: Some(output.div_ceil(4) as u64),
         cached_input_tokens: None,

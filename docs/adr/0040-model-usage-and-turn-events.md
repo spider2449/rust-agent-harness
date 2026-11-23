@@ -28,7 +28,11 @@ never grant permission (ADR 0036, `docs/SECURITY.md`).
 1. **`ModelUsage` in `rah-protocol`.** A data-only struct with optional
    `input_tokens` (including cached), `output_tokens` (including reasoning)
    and `cached_input_tokens`. A count the provider does not report is
-   `None`, never zero. It serializes without the missing fields.
+   `None`, never zero. It serializes without the missing fields. A provider can also report
+   the effective capacity of the selected model as `context_window_tokens`.
+   The Web UI uses the latest reported request's input and capacity for its
+   context percentage. llama.cpp supplies the capacity in `/v1/models`
+   under `meta.n_ctx`.
 
 2. **`ModelEvent::Usage { usage }`.** A provider sends it at most once per
    request, before `Completed`, and only when it has at least one count.

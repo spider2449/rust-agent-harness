@@ -28,6 +28,7 @@ impl Drop for TempDir {
 
 fn usage(input: u64, output: u64, cached: Option<u64>) -> ModelUsage {
     ModelUsage {
+        context_window_tokens: None,
         input_tokens: Some(input),
         output_tokens: Some(output),
         cached_input_tokens: cached,
@@ -130,6 +131,7 @@ fn turn_events(session: &SessionId) -> Vec<AgentEvent> {
             session_id: session.clone(),
             model_request_id: second,
             usage: ModelUsage {
+                context_window_tokens: None,
                 input_tokens: Some(150),
                 output_tokens: Some(20),
                 cached_input_tokens: None,

@@ -1214,6 +1214,7 @@ function addUsage(session, usage) {
   total.output += usage.output_tokens || 0;
   total.cached += usage.cached_input_tokens || 0;
   total.requests += 1;
+  total.lastUsage = usage;
   state.usage.set(session, total);
 }
 
@@ -1225,9 +1226,21 @@ function renderUsage() {
   const item = $("status-usage");
   const total = state.current && state.usage.get(state.current);
   item.hidden = !total;
+  const context = $("context-usage");
+  context.textContent = "Context —";
+  context.title = total ? "The provider did not report context usage" : "Waiting for model usage";
   if (!total) return;
   item.textContent = `${formatTokens(total.input)} in · ${formatTokens(total.output)} out`;
-  item.title = `Tokens the model reported for this session since the page was opened: `
+  const { input_tokens: input, context_window_tokens: capacity } = total.lastUsage;
+  const hasContext = Number.isSafeInteger(input) && input >= 0
+    && Number.isSafeInteger(capacity) && capacity > 0;
+  if (hasContext) {
+    const percent = (100 * input / capacity).toFixed(1);
+    context.textContent = `Context ${percent}%`;
+    context.title = `Latest request input: ${input} of ${capacity} context tokens.`;
+  }
+  item.title = (hasContext ? `Latest request input: ${input} of ${capacity} context tokens.\n` : "")
+    + `Tokens the model reported for this session since the page was opened: `
     + `${total.input} input (${total.cached} cached), ${total.output} output, `
     + `${total.requests} model request${total.requests === 1 ? "" : "s"}`;
 }

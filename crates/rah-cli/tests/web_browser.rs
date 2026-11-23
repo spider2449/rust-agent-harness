@@ -1190,6 +1190,16 @@ async fn the_web_ui_works_in_a_real_browser() {
     assert_eq!(page.eval("byId('input').disabled").await, true);
     assert_eq!(page.eval("shown(byId('notice'))").await, false);
 
+    assert_eq!(
+        page.eval("shown(document.querySelector('#status #context-usage'))")
+            .await,
+        true
+    );
+    assert_eq!(
+        page.eval("byId('context-usage').textContent").await,
+        "Context —"
+    );
+
     // A session and a turn with a tool call.
     page.eval("byId('new-session').click(); true").await;
     page.wait(
@@ -1227,6 +1237,29 @@ async fn the_web_ui_works_in_a_real_browser() {
             .is_some_and(|text| text.ends_with("2 model requests")),
         "{title}"
     );
+
+    // A smaller subsequent prompt (e.g. after compaction) lowers the percentage.
+    for (usage, prefix) in [
+        (
+            json!({"input_tokens": 500, "context_window_tokens": 1000}),
+            "Context 50.0%",
+        ),
+        (
+            json!({"input_tokens": 125, "context_window_tokens": 1000}),
+            "Context 12.5%",
+        ),
+        (json!({"input_tokens": 42}), ""),
+    ] {
+        let status = page.eval(&format!(
+            "onEvent(state.current, {{type:'model_usage',usage:{usage}}}); byId('context-usage').textContent"
+        )).await;
+        let status = status.as_str().unwrap();
+        if prefix.is_empty() {
+            assert!(!status.contains('%'), "{status}");
+        } else {
+            assert!(status.starts_with(prefix), "{status}");
+        }
+    }
 
     // Enter sends; the textarea does not keep a newline.
     page.eval(

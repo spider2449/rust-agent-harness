@@ -1084,6 +1084,7 @@ fn missing_usage_is_unknown_instead_of_zero() {
         session_id: session.clone(),
         model_request_id: id,
         usage: ModelUsage {
+            context_window_tokens: None,
             input_tokens: Some(42),
             output_tokens: Some(3),
             cached_input_tokens: None,

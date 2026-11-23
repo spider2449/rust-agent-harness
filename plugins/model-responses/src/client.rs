@@ -38,6 +38,7 @@ struct Served {
     id: String,
     /// Whether `/v1/models` lists image input for it.
     images: bool,
+    context_window_tokens: Option<u64>,
 }
 
 /// A Responses API model. Credentials are never exposed through Debug,
@@ -95,9 +96,13 @@ impl ResponsesModel {
 
     /// The model to ask, and whether it takes image input. OpenAI models are
     /// assumed to; a llama-server model only when the server says so.
-    async fn model(&self, requested: Option<String>) -> Result<(String, bool), E> {
+    async fn model(&self, requested: Option<String>) -> Result<Served, E> {
         match &self.flavor {
-            Flavor::OpenAi { model } => Ok((requested.unwrap_or_else(|| model.clone()), true)),
+            Flavor::OpenAi { model } => Ok(Served {
+                id: requested.unwrap_or_else(|| model.clone()),
+                images: true,
+                context_window_tokens: None,
+            }),
             Flavor::LlamaCpp {
                 origin,
                 model,
@@ -113,9 +118,7 @@ impl ResponsesModel {
                     None if served.len() == 1 => served.first(),
                     None => None,
                 };
-                found
-                    .map(|served| (served.id.clone(), served.images))
-                    .ok_or(E::ModelUnavailable)
+                found.cloned().ok_or(E::ModelUnavailable)
             }
         }
     }
@@ -171,6 +174,7 @@ impl ResponsesModel {
                     models.push(Served {
                         id: id.to_owned(),
                         images,
+                        context_window_tokens: item["meta"]["n_ctx"].as_u64().filter(|n| *n > 0),
                     });
                 }
             }
@@ -222,7 +226,7 @@ impl ModelProvider for ResponsesModel {
         request: ModelRequest,
         cancel: CancellationToken,
     ) -> Result<ModelStream, ModelError> {
-        let (model, images) = tokio::select! {
+        let model = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(ModelError::Cancelled),
             model = self.model(request.model.clone()) => model?,
@@ -230,8 +234,8 @@ impl ModelProvider for ResponsesModel {
         let llamacpp = self.is_llamacpp();
         let names = ToolNames::new(&request.tools);
         let body = json!({
-            "model": model,
-            "input": wire::input(&request.items, &names, llamacpp, images)?,
+            "model": model.id,
+            "input": wire::input(&request.items, &names, llamacpp, model.images)?,
             "tools": wire::tools(&request.tools, &names)?,
             "stream": true,
             "store": false,
@@ -280,7 +284,13 @@ impl ModelProvider for ResponsesModel {
         if !event_stream {
             return Err(E::Protocol.into());
         }
-        Ok(Box::pin(events(response, names, llamacpp, cancel)))
+        Ok(Box::pin(events(
+            response,
+            names,
+            llamacpp,
+            model.context_window_tokens,
+            cancel,
+        )))
     }
 }
 
@@ -288,6 +298,7 @@ fn events(
     response: reqwest::Response,
     names: ToolNames,
     llamacpp: bool,
+    context_window_tokens: Option<u64>,
     cancel: CancellationToken,
 ) -> impl Stream<Item = Result<ModelEvent, ModelError>> + Send + 'static {
     async_stream::try_stream! {
@@ -352,7 +363,8 @@ fn events(
                 arguments,
             };
         }
-        if let Some(usage) = parsed.usage() {
+        if let Some(mut usage) = parsed.usage() {
+            usage.context_window_tokens = context_window_tokens;
             yield ModelEvent::Usage { usage };
         }
         yield ModelEvent::Completed;

@@ -328,6 +328,7 @@ async fn tool_use_maps_back_to_the_original_tool_name() {
             // `message_start` counts 3 input tokens; `message_delta` ends at 5 output.
             ModelEvent::Usage {
                 usage: ModelUsage {
+                    context_window_tokens: None,
                     input_tokens: Some(3),
                     output_tokens: Some(5),
                     cached_input_tokens: None,
@@ -358,6 +359,7 @@ async fn cache_reads_and_writes_count_as_input_tokens() {
         events[events.len() - 2],
         ModelEvent::Usage {
             usage: ModelUsage {
+                context_window_tokens: None,
                 input_tokens: Some(330),
                 output_tokens: Some(5),
                 cached_input_tokens: Some(300),

@@ -288,6 +288,7 @@ button.icon { padding: 0 0.428571rem; font-size: 0.857143rem; line-height: 1.285
   font-size: 0.857143rem; white-space: nowrap; overflow: hidden;
 }
 .status .item { overflow: hidden; text-overflow: ellipsis; }
+.status #context-usage { flex: none; font-variant-numeric: tabular-nums; }
 .status button.link {
   font: inherit; border: none; background: none; color: var(--text); padding: 0 0.285714rem;
   border-radius: 0.285714rem; cursor: pointer; white-space: nowrap;

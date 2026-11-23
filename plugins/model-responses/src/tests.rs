@@ -260,6 +260,7 @@ async fn reported_usage_is_sent_before_completed() {
         [
             ModelEvent::Usage {
                 usage: ModelUsage {
+                    context_window_tokens: None,
                     input_tokens: Some(120),
                     output_tokens: Some(7),
                     cached_input_tokens: Some(100),
@@ -403,6 +404,37 @@ async fn llamacpp_discovers_lazily_normalizes_events_and_marks_assistant_message
     // Discovery is cached: the fourth request is the next Responses call.
     assert!(requests[4].0.starts_with("POST /v1/responses"));
     assert_eq!(requests[4].1["input"][1]["type"], "message");
+}
+
+#[tokio::test]
+async fn llamacpp_reports_the_selected_models_runtime_context_capacity() {
+    let mut events = text_events("hi");
+    events.last_mut().unwrap()["response"]["usage"] = json!({"input_tokens": 128});
+    let server = Server::new(vec![
+        Reply::Json(200, json!({"status": "ok"})),
+        Reply::Json(
+            200,
+            json!({"data": [
+                {"id": "other", "meta": {"n_ctx": 4096}},
+                {"id": "selected", "meta": {"n_ctx": 8192, "n_ctx_train": 131072}}
+            ]}),
+        ),
+        Reply::Sse(frames(&events)),
+    ])
+    .await;
+    let model = ResponsesModel::llamacpp(
+        server.origin.clone(),
+        String::new(),
+        Some("selected".into()),
+    )
+    .unwrap();
+    let events = collect(&model, request(user("hi"))).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ModelEvent::Usage { usage }
+        if usage.input_tokens == Some(128) && usage.context_window_tokens == Some(8192)))
+    );
 }
 
 #[tokio::test]

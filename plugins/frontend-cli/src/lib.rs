@@ -1260,11 +1260,13 @@ mod tests {
     fn usage_sums_only_reported_counts_and_keeps_unknown_ones_null() {
         let mut totals = UsageTotals::default();
         totals.add(&ModelUsage {
+            context_window_tokens: None,
             input_tokens: Some(100),
             output_tokens: Some(20),
             cached_input_tokens: None,
         });
         totals.add(&ModelUsage {
+            context_window_tokens: None,
             input_tokens: Some(50),
             output_tokens: None,
             cached_input_tokens: None,

@@ -274,6 +274,7 @@ async fn streams_text_and_sends_a_chat_completions_request() {
         events[events.len() - 2],
         ModelEvent::Usage {
             usage: ModelUsage {
+                context_window_tokens: None,
                 input_tokens: Some(12),
                 output_tokens: Some(3),
                 cached_input_tokens: Some(8),

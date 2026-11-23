@@ -225,6 +225,7 @@ impl Response {
         }
         if let Some(usage) = chunk.get("usage").filter(|usage| usage.is_object()) {
             self.usage = ModelUsage {
+                context_window_tokens: None,
                 input_tokens: usage["prompt_tokens"].as_u64(),
                 output_tokens: usage["completion_tokens"].as_u64(),
                 // OpenAI and vLLM; DeepSeek reports its cache hits separately.
@@ -538,6 +539,7 @@ mod tests {
         assert_eq!(
             response.usage(),
             Some(ModelUsage {
+                context_window_tokens: None,
                 input_tokens: Some(10),
                 output_tokens: Some(4),
                 cached_input_tokens: Some(6),

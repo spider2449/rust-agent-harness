@@ -368,6 +368,7 @@ impl Response {
                 }
                 let usage = &v["response"]["usage"];
                 self.usage = ModelUsage {
+                    context_window_tokens: None,
                     input_tokens: usage["input_tokens"].as_u64(),
                     output_tokens: usage["output_tokens"].as_u64(),
                     cached_input_tokens: usage["input_tokens_details"]["cached_tokens"].as_u64(),
