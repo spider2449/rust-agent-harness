@@ -1543,7 +1543,7 @@ async fn the_web_ui_works_in_a_real_browser() {
             "const kind = byId('editor-kind'); kind.value = 'loop-react'; \
              kind.dispatchEvent(new Event('change')); \
              byId('editor-config').value === '' && \
-             byId('editor-config').placeholder.includes('\"max_rounds\": 32')"
+             byId('editor-config').placeholder.includes('\"max_rounds\": 128')"
         )
         .await,
         true
@@ -1553,7 +1553,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     assert_eq!(
         page.eval(
             "byId('editor-example').click(); \
-             JSON.parse(byId('editor-config').value).max_rounds === 32"
+             JSON.parse(byId('editor-config').value).max_rounds === 128"
         )
         .await,
         true

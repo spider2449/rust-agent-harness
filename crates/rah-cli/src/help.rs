@@ -140,7 +140,7 @@ pub fn fallback(kind: &str) -> Help {
             ),
         ],
         "loop-react" => &[
-            ("max_rounds", "Most model requests per turn (32)."),
+            ("max_rounds", "Most model requests per turn (128)."),
             (
                 "retries",
                 "How many times a model request the provider could not take is opened again (10; 0 turns it off).",

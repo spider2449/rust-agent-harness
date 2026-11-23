@@ -434,7 +434,7 @@ function loopForm() {
     fields.replaceChildren();
     for (const key of Object.keys(inputs)) delete inputs[key];
     if (kind.value === "loop-react") {
-      inputs.max_rounds = numberInput(value("max_rounds"), "32");
+      inputs.max_rounds = numberInput(value("max_rounds"), "128");
       fields.append(advanced(field("Most model rounds per message", inputs.max_rounds, "Rounds that may call tools. When they are used up, the model answers from what it has gathered.")));
     } else {
       inputs.max_steps = numberInput(value("max_steps"), "8");

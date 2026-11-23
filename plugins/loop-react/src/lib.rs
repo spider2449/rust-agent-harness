@@ -21,7 +21,7 @@
 //! reports each wait; `retries = 0` turns retrying off.
 //!
 //! Configuration: `{ "max_rounds": <n>, "retries": 10, "retry_delay_ms": 2000 }`
-//! (`max_rounds` defaults to 32).
+//! (`max_rounds` defaults to 128).
 
 use std::sync::Arc;
 
@@ -44,7 +44,7 @@ use rah_protocol::{
 };
 use serde::Deserialize;
 
-const DEFAULT_MAX_ROUNDS: u32 = 32;
+const DEFAULT_MAX_ROUNDS: u32 = 128;
 
 pub struct ReactLoopPlugin {
     manifest: PluginManifest,
@@ -532,7 +532,7 @@ impl ReactLoopPlugin {
     /// An example configuration, mostly the defaults, for reference (the Web
     /// UI shows it in an empty configuration editor). It is never applied.
     pub const CONFIG_EXAMPLE: &str = r#"{
-  "max_rounds": 32,
+  "max_rounds": 128,
   "retries": 10,
   "retry_delay_ms": 2000
 }"#;
