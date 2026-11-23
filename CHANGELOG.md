@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.45.42 (2026-11-23)
+
+- Web and Desktop keep the current turn running when someone tries to change
+  loop settings. The conversation also warns when lookups repeat the same result.
+- Reopen the last active workspace on startup, show which session is running,
+  and fix turn handling in forked sessions and approval reuse.
+- Use local llama.cpp when no model is configured, show context window usage,
+  and support configurable HTTP timeouts. The default ReAct loop now allows
+  128 model rounds per message that can call tools.
+- New user configurations default to full tool permissions.
+- Add skill management and GitHub package imports, plus opt-in Maya and Blender
+  scene tools with Windows discovery and bundled Python support.
+- Improve Graphify search, Python call resolution and graph layout, and add
+  optional read-only CBM integration for code navigation.
+- Fix workspace isolation, session log coordination and scheduler lifecycle.
+
 ## v0.45.41 (2026-11-18)
 
 - Refresh the RAH logo, browser favicon and Windows icons with a modular R

@@ -2571,7 +2571,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rah-api"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "async-trait",
  "futures",
@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "rah-cli"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "clap",
  "embed-resource",
@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "rah-desktop"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "clap",
  "embed-resource",
@@ -2653,7 +2653,7 @@ dependencies = [
 
 [[package]]
 name = "rah-kernel"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "async-trait",
  "futures",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-context-compact"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "futures",
  "rah-api",
@@ -2678,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-context-default"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2689,7 +2689,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-context-instructions"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-format-on-write"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2712,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-frontend-cli"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "futures",
  "rah-api",
@@ -2724,7 +2724,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-frontend-web"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "axum",
  "futures",
@@ -2738,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-host-process"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "futures",
  "rah-api",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-host-wasm"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2763,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-loop-plan"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "futures",
  "rah-api",
@@ -2775,7 +2775,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-loop-react"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "futures",
  "rah-api",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-lsp-diagnostics"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2799,7 +2799,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-model-anthropic"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "async-stream",
  "futures",
@@ -2814,7 +2814,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-model-chat-completions"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "async-stream",
  "futures",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-model-mock"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "futures",
  "rah-api",
@@ -2841,7 +2841,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-model-responses"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "async-stream",
  "futures",
@@ -2856,7 +2856,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-plugin-builder"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-policy-authority"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2878,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-sandbox-process"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "libc",
  "rah-api",
@@ -2890,7 +2890,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-scheduler-basic"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "futures",
  "rah-api",
@@ -2903,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-session-jsonl"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2915,7 +2915,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-session-titles"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "futures",
  "rah-api",
@@ -2927,7 +2927,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-skills-fs"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2941,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-storage-fs"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "serde",
@@ -2951,7 +2951,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-telemetry-log"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2962,7 +2962,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-todo"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2973,7 +2973,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tool-input-repair"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2983,7 +2983,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tools-builtin"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -2995,7 +2995,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tools-http"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -3007,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tools-mcp"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -3019,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tools-repo"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -3030,7 +3030,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tools-repo-write"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -3042,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tools-shell"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "rah-protocol",
@@ -3053,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-tools-web-search"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "encoding_rs",
  "futures",
@@ -3067,7 +3067,7 @@ dependencies = [
 
 [[package]]
 name = "rah-plugin-ui-layout-config"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "rah-api",
  "serde_json",
@@ -3076,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "rah-protocol"
-version = "0.45.41"
+version = "0.45.42"
 dependencies = [
  "serde",
  "serde_json",
