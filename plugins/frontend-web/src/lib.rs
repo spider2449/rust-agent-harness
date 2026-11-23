@@ -211,6 +211,8 @@ pub(crate) struct Shared {
     pub token: String,
     pub hosts: Vec<String>,
     pub approvals: Approvals,
+    /// Web turns hold a reader while loop settings require exclusive access.
+    pub loop_usage: Arc<tokio::sync::RwLock<()>>,
     /// Cancelled when the plugin scope is disposed.
     pub stop: CancellationToken,
     pub spawner: rah_api::kernel::Spawner,
@@ -280,6 +282,7 @@ impl Plugin for WebFrontendPlugin {
             token: access::new_token(),
             hosts: access::allowed_hosts(address),
             approvals: Approvals::new(timeout),
+            loop_usage: Arc::default(),
             stop: spawner.cancellation(),
             spawner,
             notices: rah_api::host::NoticeOnce::new(scope.kernel(), scope.id().clone()),

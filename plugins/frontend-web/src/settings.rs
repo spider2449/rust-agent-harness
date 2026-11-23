@@ -94,6 +94,16 @@ pub(crate) async fn save(
             save.kind
         )));
     }
+    let _loop_change = if slot == "loop" {
+        Some(shared.loop_usage.try_write().map_err(|_| {
+            ApiError(
+                StatusCode::CONFLICT,
+                "The loop is in use. Save again after the current work finishes.".into(),
+            )
+        })?)
+    } else {
+        None
+    };
     let admin = admin(&shared)?;
     let current = save
         .id

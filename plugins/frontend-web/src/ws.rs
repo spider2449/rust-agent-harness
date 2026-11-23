@@ -51,6 +51,7 @@ enum ClientMessage {
 }
 
 struct Running {
+    _loop_usage: tokio::sync::OwnedRwLockReadGuard<()>,
     session: SessionId,
     events: TurnStream,
     cancel: CancellationToken,
@@ -146,6 +147,7 @@ async fn handle(
             let Ok(session) = SessionId::from_str(&session) else {
                 return Some(error(format!("`{session}` is not a session id")));
             };
+            let loop_usage = shared.loop_usage.clone().read_owned().await;
             let Some(agent_loop) = shared.kernel.get(LOOP) else {
                 return Some(error("no agent loop is mounted"));
             };
@@ -157,6 +159,7 @@ async fn handle(
                 cancel: cancel.clone(),
             });
             *running = Some(Running {
+                _loop_usage: loop_usage,
                 session,
                 events,
                 cancel,

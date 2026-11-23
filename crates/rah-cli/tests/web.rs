@@ -333,6 +333,58 @@ async fn ask_decisions_are_answered_by_the_browser() {
 }
 
 #[tokio::test]
+async fn loop_settings_preserve_a_turn_waiting_for_approval() {
+    let web = start("web-loop-busy", |distribution| {
+        distribution
+            .set_permissions(rah_cli::Permissions::Ask)
+            .unwrap();
+        distribution.set_config("policy-authority", "tools", json!({ "echo": "write" }));
+    })
+    .await;
+    let session = web.json(web.post("/api/sessions")).await;
+    let mut socket = web.socket().await;
+    send(
+        &mut socket,
+        json!({ "type": "turn", "session": session["id"], "input": "busy" }),
+    )
+    .await;
+    let approval = loop {
+        let message = next_json(&mut socket).await;
+        if message["type"] == "approval_required" {
+            break message["id"].clone();
+        }
+        assert_ne!(message["type"], "error", "{message}");
+        assert!(
+            !matches!(
+                message["event"]["type"].as_str(),
+                Some("failed" | "cancelled" | "completed")
+            ),
+            "{message}"
+        );
+    };
+    let replace = || {
+        web.request(reqwest::Method::PUT, "/api/settings/loop")
+            .json(&json!({ "id": "loop-react", "kind": "loop-plan", "config": {} }))
+    };
+    assert_eq!(web.status(replace()).await.0, 409);
+    send(
+        &mut socket,
+        json!({ "type": "approval", "id": approval, "approve": true }),
+    )
+    .await;
+    loop {
+        let message = next_json(&mut socket).await;
+        assert_ne!(message["type"], "error", "{message}");
+        match message["event"]["type"].as_str() {
+            Some("completed") => break,
+            Some("failed" | "cancelled") => panic!("{message}"),
+            _ => {}
+        }
+    }
+    assert_eq!(web.json(replace()).await["state"], "active");
+}
+
+#[tokio::test]
 async fn always_allows_a_tool_for_that_session_only() {
     let web = start("web-always", |distribution| {
         distribution
