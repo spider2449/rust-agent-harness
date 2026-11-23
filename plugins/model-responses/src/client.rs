@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::{Stream, StreamExt};
 use rah_api::{
@@ -48,25 +48,82 @@ pub struct ResponsesModel {
     endpoint: String,
     key: String,
     flavor: Flavor,
+    timeouts: Timeouts,
 }
 
-fn build_client(https_only: bool) -> Result<reqwest::Client, String> {
+#[derive(Clone, Copy)]
+struct Timeouts {
+    connect: Duration,
+    read: Duration,
+    request: Duration,
+}
+
+impl From<&crate::LlamaConfig> for Timeouts {
+    fn from(config: &crate::LlamaConfig) -> Self {
+        let seconds = |value: Option<std::num::NonZeroU32>, default| {
+            Duration::from_secs(value.map_or(default, |n| u64::from(n.get())))
+        };
+        Self {
+            connect: seconds(config.connect_timeout_secs, 30),
+            read: seconds(config.read_timeout_secs, 120),
+            request: seconds(config.request_timeout_secs, 600),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RequestTiming {
+    started: Instant,
+    last_received: Option<Instant>,
+    limits: Timeouts,
+}
+
+impl RequestTiming {
+    fn error(self, error: reqwest::Error) -> ModelError {
+        if !error.is_timeout() {
+            return E::Transport.into();
+        }
+        let elapsed = self.started.elapsed();
+        let idle = self.last_received.unwrap_or(self.started).elapsed();
+        let cause = if elapsed >= self.limits.request {
+            "HTTP request total timeout"
+        } else if error.is_connect() {
+            "HTTP connection timeout"
+        } else if idle >= self.limits.read {
+            "HTTP read idle timeout"
+        } else {
+            "HTTP timeout"
+        };
+        let progress = match self.last_received {
+            Some(_) => format!("last response data {} ms ago", idle.as_millis()),
+            None => "awaiting response headers".to_owned(),
+        };
+        ModelError::Transport(format!(
+            "{cause} ({} ms elapsed, {progress})",
+            elapsed.as_millis()
+        ))
+    }
+}
+
+fn build_client(https_only: bool, limits: Timeouts) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .https_only(https_only)
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .no_proxy()
-        .connect_timeout(Duration::from_secs(30))
-        .read_timeout(Duration::from_secs(120))
-        .timeout(Duration::from_secs(600))
+        .connect_timeout(limits.connect)
+        .read_timeout(limits.read)
+        .timeout(limits.request)
         .build()
         .map_err(|_| "cannot build the HTTP client".to_owned())
 }
 
 impl ResponsesModel {
     pub(crate) fn openai(endpoint: String, key: String, model: String) -> Result<Self, String> {
+        let timeouts = Timeouts::from(&crate::LlamaConfig::default());
         Ok(Self {
-            client: build_client(endpoint == OPENAI_ENDPOINT)?,
+            timeouts,
+            client: build_client(endpoint == OPENAI_ENDPOINT, timeouts)?,
             endpoint,
             key,
             flavor: Flavor::OpenAi { model },
@@ -76,15 +133,17 @@ impl ResponsesModel {
     pub(crate) fn llamacpp(
         origin: String,
         key: String,
-        model: Option<String>,
+        config: crate::LlamaConfig,
     ) -> Result<Self, String> {
+        let timeouts = Timeouts::from(&config);
         Ok(Self {
-            client: build_client(false)?,
+            timeouts,
+            client: build_client(false, timeouts)?,
             endpoint: format!("{origin}/v1/responses"),
             key,
             flavor: Flavor::LlamaCpp {
                 origin,
-                model,
+                model: config.model,
                 served: Mutex::new(None),
             },
         })
@@ -249,15 +308,25 @@ impl ModelProvider for ResponsesModel {
         if !self.key.is_empty() {
             post = post.bearer_auth(&self.key);
         }
+        let mut timing = RequestTiming {
+            started: Instant::now(),
+            last_received: None,
+            limits: self.timeouts,
+        };
         let response = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(ModelError::Cancelled),
             response = post.send() => response,
         };
-        let Ok(response) = response else {
-            self.forget_discovery().await;
-            return Err(E::Transport.into());
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let failure = timing.error(error);
+                self.forget_discovery().await;
+                return Err(failure);
+            }
         };
+        timing.last_received = Some(Instant::now());
         match response.status().as_u16() {
             200 => {}
             401 | 403 => return Err(E::Authentication.into()),
@@ -289,6 +358,7 @@ impl ModelProvider for ResponsesModel {
             names,
             llamacpp,
             model.context_window_tokens,
+            timing,
             cancel,
         )))
     }
@@ -299,6 +369,7 @@ fn events(
     names: ToolNames,
     llamacpp: bool,
     context_window_tokens: Option<u64>,
+    mut timing: RequestTiming,
     cancel: CancellationToken,
 ) -> impl Stream<Item = Result<ModelEvent, ModelError>> + Send + 'static {
     async_stream::try_stream! {
@@ -317,9 +388,10 @@ fn events(
             let chunk = match next {
                 None => break 'read,
                 Some(Err(None)) => Err(ModelError::Cancelled)?,
-                Some(Err(Some(_))) => Err(ModelError::from(E::Transport))?,
+                Some(Err(Some(error))) => Err(timing.error(error))?,
                 Some(Ok(chunk)) => chunk,
             };
+            timing.last_received = Some(Instant::now());
             total += chunk.len();
             if total > MAX_BYTES * 2 {
                 Err::<(), _>(ModelError::from(E::Sse))?;

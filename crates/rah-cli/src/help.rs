@@ -228,6 +228,18 @@ pub fn fallback(kind: &str) -> Help {
         ],
         "model-llamacpp" => &[
             (
+                "connect_timeout_secs",
+                "HTTP connection timeout in seconds (30).",
+            ),
+            (
+                "read_timeout_secs",
+                "HTTP read idle timeout in seconds (120).",
+            ),
+            (
+                "request_timeout_secs",
+                "Total HTTP request timeout in seconds (600).",
+            ),
+            (
                 "endpoint",
                 "llama-server address; a loopback origin only (http://127.0.0.1:8080).",
             ),

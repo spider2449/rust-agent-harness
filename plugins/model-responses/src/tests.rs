@@ -375,7 +375,7 @@ async fn llamacpp_discovers_lazily_normalizes_events_and_marks_assistant_message
     let model = ResponsesModel::llamacpp(
         llamacpp_origin(&server.origin).unwrap(),
         String::new(),
-        None,
+        LlamaConfig::default(),
     )
     .unwrap();
 
@@ -425,7 +425,10 @@ async fn llamacpp_reports_the_selected_models_runtime_context_capacity() {
     let model = ResponsesModel::llamacpp(
         server.origin.clone(),
         String::new(),
-        Some("selected".into()),
+        LlamaConfig {
+            model: Some("selected".into()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let events = collect(&model, request(user("hi"))).await.unwrap();
@@ -443,12 +446,21 @@ async fn llamacpp_requires_an_explicit_model_when_several_are_served() {
     replies.extend(llama_discovery(&["a", "b"]));
     let server = Server::new(replies).await;
     let origin = llamacpp_origin(&server.origin).unwrap();
-    let ambiguous = ResponsesModel::llamacpp(origin.clone(), String::new(), None).unwrap();
+    let ambiguous =
+        ResponsesModel::llamacpp(origin.clone(), String::new(), LlamaConfig::default()).unwrap();
     assert!(matches!(
         collect(&ambiguous, request(user("x"))).await,
         Err(ModelError::Rejected(_))
     ));
-    let missing = ResponsesModel::llamacpp(origin, String::new(), Some("c".into())).unwrap();
+    let missing = ResponsesModel::llamacpp(
+        origin,
+        String::new(),
+        LlamaConfig {
+            model: Some("c".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert!(matches!(
         collect(&missing, request(user("x"))).await,
         Err(ModelError::Rejected(m)) if m.contains("not served")
@@ -464,8 +476,15 @@ async fn llamacpp_health_reads_readiness_and_served_models_only() {
     let server = Server::new(replies).await;
     let origin = llamacpp_origin(&server.origin).unwrap();
     let health = |model: Option<&str>| {
-        let model =
-            ResponsesModel::llamacpp(origin.clone(), String::new(), model.map(Into::into)).unwrap();
+        let model = ResponsesModel::llamacpp(
+            origin.clone(),
+            String::new(),
+            LlamaConfig {
+                model: model.map(Into::into),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         async move { model.health(CancellationToken::new()).await }
     };
     assert!(matches!(health(None).await, ModelHealth::Unavailable(m) if m.contains("loading")));
@@ -540,7 +559,7 @@ async fn llamacpp_sends_images_only_to_a_model_listed_with_image_input() {
         let model = ResponsesModel::llamacpp(
             llamacpp_origin(&server.origin).unwrap(),
             String::new(),
-            None,
+            LlamaConfig::default(),
         )
         .unwrap();
         let events = collect(&model, request(screenshot.clone())).await.unwrap();
@@ -696,4 +715,41 @@ async fn a_request_that_does_not_fit_is_a_context_overflow() {
     assert!(matches!(&errors[0], ModelError::ContextOverflow(m) if !m.contains("8192")));
     assert!(matches!(&errors[1], ModelError::ContextOverflow(_)));
     assert!(matches!(&errors[2], ModelError::Rejected(m) if m.contains("400")));
+}
+
+#[tokio::test]
+async fn llamacpp_distinguishes_idle_and_total_timeouts_in_a_stream() {
+    for (read, total, expected) in [
+        (1, 30, "read idle timeout"),
+        (30, 1, "request total timeout"),
+    ] {
+        let mut replies = llama_discovery(&["qwen"]);
+        replies.push(Reply::Hold);
+        let server = Server::new(replies).await;
+        let config = serde_json::from_value(json!({
+            "read_timeout_secs": read,
+            "request_timeout_secs": total
+        }))
+        .unwrap();
+        let model = ResponsesModel::llamacpp(server.origin.clone(), String::new(), config).unwrap();
+        let error = collect(&model, request(user("x"))).await.unwrap_err();
+        assert!(
+            matches!(&error, ModelError::Transport(message)
+            if message.contains(expected) && message.contains("last response data")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn llama_timeouts_require_positive_whole_seconds() {
+    for key in [
+        "connect_timeout_secs",
+        "read_timeout_secs",
+        "request_timeout_secs",
+    ] {
+        for invalid in [json!(0), json!(-1), json!(1.5), json!("30")] {
+            assert!(serde_json::from_value::<LlamaConfig>(json!({(key): invalid})).is_err());
+        }
+    }
 }

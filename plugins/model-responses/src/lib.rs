@@ -192,6 +192,9 @@ impl LlamaCppPlugin {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LlamaConfig {
+    connect_timeout_secs: Option<std::num::NonZeroU32>,
+    read_timeout_secs: Option<std::num::NonZeroU32>,
+    request_timeout_secs: Option<std::num::NonZeroU32>,
     endpoint: Option<String>,
     model: Option<String>,
     api_key_env: Option<String>,
@@ -234,7 +237,7 @@ impl Plugin for LlamaCppPlugin {
         if !key.is_empty() {
             check_key_transport(variable, &origin)?;
         }
-        let model = ResponsesModel::llamacpp(origin, key, config.model)?;
+        let model = ResponsesModel::llamacpp(origin, key, config)?;
         scope.provide(MODEL, Arc::new(model))?;
         Ok(())
     }
@@ -246,7 +249,10 @@ impl LlamaCppPlugin {
     pub const CONFIG_EXAMPLE: &str = r#"{
   "endpoint": "http://127.0.0.1:8080",
   "model": "<served model id>",
-  "api_key_env": "RAH_LLAMA_CPP_API_KEY"
+  "api_key_env": "RAH_LLAMA_CPP_API_KEY",
+  "connect_timeout_secs": 30,
+  "read_timeout_secs": 120,
+  "request_timeout_secs": 600
 }"#;
 }
 

@@ -2922,6 +2922,31 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     page.eval("byId('settings-close').click(); true").await;
     assert_eq!(page.eval("byId('settings-dialog').open").await, false);
 
+    // Save llama.cpp timeouts through the same controls used by Desktop.
+    page.eval("byId('open-settings').click(); true").await;
+    page.eval(&TAB.replace("{tab}", "model")).await;
+    page.eval(&format!(
+        "{{ const provider = document.querySelector('#settings-body select'); \
+         provider.value = 'model-llamacpp'; provider.dispatchEvent(new Event('change')); \
+         const fields = document.querySelectorAll('#settings-body input[type=number]'); \
+         [30, 300, 1800].forEach((v, i) => fields[i].value = v); {}; true }}",
+        save("Save model")
+    ))
+    .await;
+    page.wait(
+        "the saved llama.cpp model",
+        "byId('settings-message').textContent.startsWith('Model saved. Reconnected: llama.cpp')",
+    )
+    .await;
+    let file = std::fs::read_to_string(common::config_file(&web.dir)).unwrap();
+    for setting in [
+        "connect_timeout_secs = 30",
+        "read_timeout_secs = 300",
+        "request_timeout_secs = 1800",
+    ] {
+        assert!(file.contains(setting), "{file}");
+    }
+
     page.eval("true").await;
     // The refused model configuration answers 400; that network error is
     // expected.

@@ -165,9 +165,17 @@ function modelForm() {
     if (kind.value === "model-llamacpp") {
       inputs.endpoint = textInput(value("endpoint"), "http://127.0.0.1:8080");
       inputs.model = textInput(value("model"), "the model the server runs");
+      inputs.connect_timeout_secs = numberInput(value("connect_timeout_secs"), "30");
+      inputs.read_timeout_secs = numberInput(value("read_timeout_secs"), "120");
+      inputs.request_timeout_secs = numberInput(value("request_timeout_secs"), "600");
       fields.append(
         field("Server address", inputs.endpoint, "llama-server's address, on this machine or the network (such as http://192.168.1.5:8080). A key is sent only over https or to this machine."),
         field("Model name", inputs.model, "Leave empty when the server runs one model."),
+        advanced(
+          field("Connection timeout (seconds)", inputs.connect_timeout_secs),
+          field("Read idle timeout (seconds)", inputs.read_timeout_secs, "Maximum wait for response data between reads."),
+          field("Total request timeout (seconds)", inputs.request_timeout_secs, "Includes connection time and the entire streamed response."),
+        ),
       );
     } else if (kind.value === "model-openai") {
       inputs.model = textInput(value("model"), "for example gpt-5-mini");
@@ -215,7 +223,9 @@ function modelForm() {
     saveButton("Save model", async () => {
       const next = kind.value === current?.kind ? { ...config } : {};
       for (const [key, input] of Object.entries(inputs)) {
-        if (input.isConnected) put(next, key, input.value.trim());
+        if (!input.isConnected) continue;
+        if (input.type === "number" && !input.reportValidity()) return;
+        put(next, key, input.type === "number" ? numberOrEmpty(input) : input.value.trim());
       }
       if (kind.value === "model-openai" && !next.model) throw new Error("Enter the OpenAI model.");
       if (kind.value === "model-chat-completions" && !next.provider && !next.base_url) {
