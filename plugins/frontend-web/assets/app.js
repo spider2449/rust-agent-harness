@@ -897,7 +897,51 @@ function setRunning(running) {
 // background.
 const busy = { started: 0, timer: null, tool: "" };
 
+// Compare the short answers to recent lookups, since different queries can
+// keep returning the same declaration or no matches. Only the live turn owns
+// this window. A write or another kind of tool starts a fresh window.
+const recentLookupResults = [];
+let pendingLookup = null;
+
+function lookupRequested(call) {
+  const input = call.input || {};
+  const shellQuery = value => typeof value === "string" &&
+    /\b(?:Select-String|Get-Content|Get-ChildItem|rg)\b/i.test(value);
+  const lookup = ["fs.read", "fs.grep"].includes(call.name) ||
+    (call.name === "shell.exec" && (shellQuery(input.program) || (Array.isArray(input.args) && input.args.some(shellQuery))));
+  pendingLookup = lookup ? call.id : null;
+  if (!lookup) clearLookupResults();
+}
+
+function clearLookupResults() {
+  pendingLookup = null;
+  recentLookupResults.length = 0;
+  $("repeat-lookups").hidden = true;
+}
+
+function lookupFinished(event) {
+  if (!pendingLookup || pendingLookup !== event.tool_call_id) return;
+  pendingLookup = null;
+  const items = event.output.content || [];
+  const item = items.length === 1 && items[0];
+  let text;
+  if (item?.type === "text") text = item.value;
+  if (item?.type === "json" && item.value?.exit_code === 0 && !item.value.stderr) {
+    text = item.value.stdout;
+  }
+  if (event.output.is_error || typeof text !== "string" || text.length > 512) {
+    clearLookupResults();
+    return;
+  }
+  const result = text.trim().replace(/\s+/g, " ");
+  recentLookupResults.push(result);
+  if (recentLookupResults.length > 5) recentLookupResults.shift();
+  $("repeat-lookups").hidden = recentLookupResults.length < 5 ||
+    !recentLookupResults.some(value => recentLookupResults.filter(other => other === value).length >= 3);
+}
+
 function startBusy() {
+  clearLookupResults();
   busy.started = Date.now();
   setBusyPhase("Sending…");
   tickBusy();
@@ -906,6 +950,7 @@ function startBusy() {
 }
 
 function stopBusy() {
+  clearLookupResults();
   clearInterval(busy.timer);
   busy.timer = null;
 }
@@ -922,6 +967,8 @@ function setBusyPhase(text, waiting) {
 
 function busyEvent(event) {
   if (!state.running) return;
+  if (event.type === "tool_requested") lookupRequested(event.tool_call);
+  if (event.type === "tool_finished") lookupFinished(event);
   // Turn events and approval requests arrive on different paths; an open
   // approval card wins until it is answered.
   if (document.querySelector("#approvals .approval")) {

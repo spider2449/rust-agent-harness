@@ -1374,6 +1374,22 @@ async fn the_web_ui_works_in_a_real_browser() {
          byId('busy').classList.contains('waiting') && /^\\d+s$/.test(byId('busy-time').textContent)",
     )
     .await;
+    // Different PowerShell queries can produce the same empty answer.
+    let lookup_warning = page.eval(r#"(() => {
+        const hidden = () => byId('repeat-lookups').hidden;
+        const states = [];
+        for (const [id, stdout] of ["", "impl Fonts {", "pub struct Fonts {", " ", "  "].entries()) {
+            busyEvent({type: "tool_requested", tool_call: {id: String(id), name: "shell.exec",
+                input: {program: "powershell", args: ["-Command", "Select-String -Pattern " + id]}}});
+            busyEvent({type: "tool_finished", tool_call_id: String(id), output: {content: [
+                {type: "json", value: {exit_code: 0, stderr: "", stdout}}]}});
+            states.push(hidden());
+        }
+        busyEvent({type: "tool_requested", tool_call: {id: "edit", name: "fs.edit", input: {}}});
+        states.push(hidden());
+        return states;
+    })()"#).await;
+    assert_eq!(lookup_warning, json!([true, true, true, true, false, true]));
     page.screenshot("busy-approval").await;
     // The title names the version.
     let title = format!("RAH {}", env!("CARGO_PKG_VERSION"));
