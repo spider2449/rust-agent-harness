@@ -36,7 +36,7 @@ pub fn page(title: &str, environment: &Environment<'_>, root: &str) -> String {
             )
         })
         .collect();
-    let chosen = environment.permissions.unwrap_or(Permissions::Ask);
+    let chosen = environment.permissions.unwrap_or_default();
     let permissions: String = Permissions::ALL
         .iter()
         .map(|permissions| {

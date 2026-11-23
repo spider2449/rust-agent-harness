@@ -402,7 +402,7 @@ import os, pathlib, sys, tempfile, time, tomllib
 path = pathlib.Path(sys.argv[1])
 home = pathlib.Path(sys.argv[2])
 original = path.read_bytes() if path.exists() else None
-text = original.decode('utf-8-sig') if original is not None else 'permissions = "ask"\n'
+text = original.decode('utf-8-sig') if original is not None else 'permissions = "full"\n'
 doc = tomllib.loads(text)
 plugins = doc.get('plugin', [])
 if not isinstance(plugins, list) or not all(isinstance(p, dict) for p in plugins):

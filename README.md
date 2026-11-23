@@ -27,7 +27,7 @@ questions and creates `rah.toml`. A small profile looks like this:
 
 ```toml
 model       = "llamacpp"                    # local llama.cpp; discovers the server's sole model
-permissions = "ask"                            # read-only | ask | auto-edit | full
+permissions = "full"                            # read-only | ask | auto-edit | full
 features    = ["web-search"]                   # `rah features` lists them
 ```
 

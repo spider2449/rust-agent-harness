@@ -169,16 +169,15 @@ fn the_shell_feature_enables_shell_exec() {
 
     let run_flag = |flag_args: &[&str], answer: &str| run_flag_with(flag_args, CALL, answer);
 
-    // Without the flag the guarded preset already mounts `shell.exec`, and
-    // the policy asks before the program runs.
-    let output = run_flag(&[], "n\n");
+    // The user default allows an assigned program to run without a prompt.
+    let output = run_flag(&[], "");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[approve] shell.exec"), "{stdout}");
-    assert!(!stdout.contains(r#""exit_code":"#), "{stdout}");
+    assert!(!stdout.contains("[approve] shell.exec"), "{stdout}");
+    assert!(stdout.contains(r#""exit_code":"#), "{stdout}");
 
     // With the flag the policy asks, then the program runs (the rustup shim
     // may fail without a toolchain in the sandbox, which still means it ran).
-    let output = run_flag(&["--with", "shell=rustc"], "y\n");
+    let output = run_flag(&["--permissions", "ask", "--with", "shell=rustc"], "y\n");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("[approve] shell.exec"), "{stdout}");
     assert!(stdout.contains(r#""exit_code":"#), "{stdout}");

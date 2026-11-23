@@ -68,7 +68,7 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             parsed = tomllib.loads(config.read_text())
             self.assertNotIn("model", parsed)
-            self.assertEqual(parsed["permissions"], "ask")
+            self.assertEqual(parsed["permissions"], "full")
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows updater")

@@ -125,7 +125,7 @@ pub fn model_plugin(spec: &str) -> Result<(&'static str, Map<String, Value>), St
 }
 
 /// How much the policy lets tools do without asking.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Permissions {
     /// Reading only; writing and running programs are denied.
     ReadOnly,
@@ -134,6 +134,7 @@ pub enum Permissions {
     /// Reading and writing run; running programs asks first.
     AutoEdit,
     /// Every assigned tool runs without asking.
+    #[default]
     Full,
 }
 

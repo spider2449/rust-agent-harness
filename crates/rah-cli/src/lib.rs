@@ -265,7 +265,7 @@ pub const PRESETS: [Preset; 6] = [
 const POLICY_TEMPLATE: &str = r#"
 [[plugin]]
 use = "policy-authority"
-config = { allow = ["none", "read"], ask = ["write", "execute"], tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "repo.delete-file" = "write", "repo.move-file" = "write", "repo.commit" = "execute", "memory.*" = "write", "shell.exec" = "execute" } }
+config = { {LEVEL_RULES}, tools = { echo = "none", "fs.*" = "read", "repo.*" = "read", "repo.create-file" = "write", "repo.edit-files" = "write", "repo.patch" = "write", "repo.delete-file" = "write", "repo.move-file" = "write", "repo.commit" = "execute", "memory.*" = "write", "shell.exec" = "execute" } }
 "#;
 
 /// Program execution, mounted only by the guarded presets: the policy asks
@@ -500,23 +500,27 @@ pub fn preset_text(name: &str) -> Result<String, BootError> {
         .ok_or_else(|| BootError::UnknownPreset(name.to_owned()))?;
     Ok(compose_text(
         Some((preset.model, preset.model_config)),
-        preset.guarded,
+        preset.guarded.then_some(Permissions::Ask),
     ))
 }
 
 /// The guarded composition without a model plugin: what a file with user
 /// keys starts from (ADR 0067).
 pub(crate) fn base_text() -> String {
-    compose_text(None, true)
+    compose_text(None, Some(Permissions::default()))
 }
 
 /// The preset template with `model` (kind and inline configuration) and, when
-/// `guarded`, the policy and the shell.
-fn compose_text(model: Option<(&str, Option<&str>)>, guarded: bool) -> String {
-    let (policy, shell) = if guarded {
-        (POLICY_TEMPLATE, SHELL_TEMPLATE)
+/// a permission mode is given, the policy and the shell.
+fn compose_text(model: Option<(&str, Option<&str>)>, permissions: Option<Permissions>) -> String {
+    let (policy, shell) = if let Some(mode) = permissions {
+        let rules = format!("allow = {:?}, ask = {:?}", mode.allow(), mode.ask());
+        (
+            POLICY_TEMPLATE.replace("{LEVEL_RULES}", &rules),
+            SHELL_TEMPLATE,
+        )
     } else {
-        ("", "")
+        (String::new(), "")
     };
     let model = match model {
         Some((kind, config)) => {

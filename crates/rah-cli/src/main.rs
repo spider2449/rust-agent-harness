@@ -300,7 +300,7 @@ fn init(global: &GlobalArgs) -> Result<PathBuf, String> {
         Some(model) => user_file_text(
             model,
             &[],
-            permissions.unwrap_or(Permissions::Ask),
+            permissions.unwrap_or_default(),
             root.as_deref(),
             &global.with,
         )?,
@@ -633,7 +633,7 @@ async fn serve(distribution: &Distribution, quiet: bool) -> i32 {
         }
     }
     if !quiet {
-        if distribution.permissions == Some(Permissions::Full) {
+        if distribution.permissions_label() == Permissions::Full.name() {
             eprintln!(
                 "rah: WARNING: permissions `full` - every tool with a permission assignment \
                  runs without asking."

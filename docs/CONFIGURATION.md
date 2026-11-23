@@ -87,7 +87,7 @@ from the checkout; see [Scripts](#scripts).
 
 ```toml
 model       = "anthropic/claude-sonnet-5-5"   # <provider>/<model id>
-permissions = "ask"                            # read-only | ask | auto-edit | full
+permissions = "full"                            # read-only | ask | auto-edit | full
 root        = "D:/work/project"                # workspace; default: where rah starts
 features    = ["web-search", "shell=git,cargo"]
 
@@ -122,9 +122,12 @@ which levels run and which ask first:
 | Mode | Runs | Asks first | Denied |
 |---|---|---|---|
 | `read-only` | none, read | | write, execute |
-| `ask` (default) | none, read | write, execute | |
+| `ask` | none, read | write, execute | |
 | `auto-edit` | none, read, write | execute | |
-| `full` | everything | | |
+| `full` (user settings default) | everything | | |
+
+New user configurations and startup without a file use `full`. The named
+guarded presets selected with `extends` use `ask`.
 
 No mode grants a tool the policy has no assignment for: it is denied, and tool
 metadata can only make a decision stricter. `full` prints a warning at every
@@ -301,7 +304,7 @@ If the tool is missing from **Settings → Permissions**, enable **shell** in
 | What you want | What to select |
 | --- | --- |
 | Run the command shown in the conversation once | On its approval card, select **Allow**. |
-| Remember one command, such as a PowerShell query for the running Maya process | On its approval card, select **Always allow this command**. RAH saves the exact program and arguments in `rah.toml` when the configuration is writable. A change to the PowerShell script or its arguments requires a new approval under the default **Ask** mode. |
+| Remember one command, such as a PowerShell query for the running Maya process | On its approval card, select **Always allow this command**. RAH saves the exact program and arguments in `rah.toml` when the configuration is writable. A change to the PowerShell script or its arguments requires a new approval under **Ask** mode. |
 | Ask before every program call, including remembered commands | Open **Settings → Permissions → Advanced: a choice per tool**, set **`shell.exec`** to **Ask first**, then select **Save permissions**. |
 | Run every program permitted by the shell tool without prompting | In the same panel, set **`shell.exec`** to **Allow** and select **Save permissions**. This applies to every permitted program and all its arguments. |
 

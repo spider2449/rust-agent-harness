@@ -1345,6 +1345,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     assert_eq!(page.eval("shown(byId('editor-kind-row'))").await, false);
     page.eval(
         "{ const config = JSON.parse(byId('editor-config').value); \
+         config.allow = ['none', 'read']; config.ask = ['write', 'execute']; \
          config.tools = { ...config.tools, echo: 'write' }; \
          byId('editor-config').value = JSON.stringify(config); \
          byId('editor-save').click(); true }",
@@ -2434,8 +2435,6 @@ async fn a_file_change_is_undone_from_the_session_header() {
     .await;
     page.send_message(r#"/call repo.create-file {"path":"undo.txt","content":"u"}"#)
         .await;
-    page.wait("the approval card", "shown(approval())").await;
-    page.eval("answer('Allow'); true").await;
     page.wait(
         "the Undo button",
         "idle() && shown(byId('session-undo')) && byId('session-undo').title === 'Undo repo.create-file: undo.txt'",
@@ -2681,7 +2680,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     assert_eq!(context["system"], "Be brief.", "{context}");
     assert!(context["memory_dir"].is_string(), "{context}");
 
-    // Permissions: one mode for every tool (the base's is `ask`), and a
+    // Permissions: one mode for every tool (the base's is `full`), and a
     // choice per tool under "Advanced"; turn `echo` off; the default choice
     // shows what applies.
     page.eval(&TAB.replace("{tab}", "tools")).await;
@@ -2690,7 +2689,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
         "!!document.querySelector('#settings-body select[data-tool=\"echo\"]')",
     )
     .await;
-    assert_eq!(page.eval("byId('permissions-mode').value").await, "ask");
+    assert_eq!(page.eval("byId('permissions-mode').value").await, "full");
     page.screenshot("settings-tools").await;
     let choice = |tool: &str| {
         format!("document.querySelector('#settings-body select[data-tool=\"{tool}\"]')")
@@ -2703,7 +2702,7 @@ async fn settings_change_the_model_assistant_tools_and_loop_in_the_browser() {
     assert_eq!(
         page.eval(&format!("{}.options[0].textContent", choice("repo.patch")))
             .await,
-        "Default (asks first)"
+        "Default (allowed)"
     );
     page.eval(&format!(
         "{{ {}.value = 'deny'; {}; true }}",
@@ -3416,7 +3415,12 @@ async fn an_approval_with_large_input_keeps_its_buttons_in_view() {
         return;
     };
     let _one = ONE_BROWSER.lock().await;
-    let web = start("web-browser-large-approval").await;
+    let web = start_with("web-browser-large-approval", |distribution, _| {
+        distribution
+            .set_permissions(rah_cli::Permissions::Ask)
+            .unwrap();
+    })
+    .await;
     let file = web.dir.workspace().join("large.txt");
     let browser = Browser::launch(PathBuf::from(program), "web-browser-large-approval");
     let mut page = browser.page().await;

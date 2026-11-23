@@ -311,6 +311,9 @@ async fn sessions_turns_and_forks_work_over_http_and_the_socket() {
 #[tokio::test]
 async fn ask_decisions_are_answered_by_the_browser() {
     let web = start("web-ask", |distribution| {
+        distribution
+            .set_permissions(rah_cli::Permissions::Ask)
+            .unwrap();
         distribution.set_config(
             "policy-authority",
             "tools",
@@ -332,6 +335,9 @@ async fn ask_decisions_are_answered_by_the_browser() {
 #[tokio::test]
 async fn always_allows_a_tool_for_that_session_only() {
     let web = start("web-always", |distribution| {
+        distribution
+            .set_permissions(rah_cli::Permissions::Ask)
+            .unwrap();
         distribution.set_config(
             "policy-authority",
             "tools",
@@ -403,7 +409,12 @@ async fn run_shell_turn(
 
 #[tokio::test]
 async fn an_approved_command_can_be_allowed_from_now_on() {
-    let web = start("web-allow-command", |_| {}).await;
+    let web = start("web-allow-command", |distribution| {
+        distribution
+            .set_permissions(rah_cli::Permissions::Ask)
+            .unwrap();
+    })
+    .await;
     let session = web.json(web.post("/api/sessions")).await["id"]
         .as_str()
         .unwrap()

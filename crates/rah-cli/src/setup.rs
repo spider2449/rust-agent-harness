@@ -114,7 +114,7 @@ impl Answers {
             }
         }
         let permissions = match self.permissions.trim() {
-            "" => Permissions::Ask,
+            "" => Permissions::default(),
             permissions => permissions.parse()?,
         };
         let root = self.root.trim();
@@ -259,10 +259,10 @@ pub fn interview<R: BufRead, W: Write>(
         None => ask_until(
             input,
             out,
-            "Permissions: read-only, ask, auto-edit or full [ask]: ",
+            "Permissions: read-only, ask, auto-edit or full [full]: ",
             |answer| {
                 if answer.is_empty() {
-                    Ok(Permissions::Ask)
+                    Ok(Permissions::default())
                 } else {
                     answer.parse()
                 }
@@ -327,7 +327,7 @@ mod tests {
             distribution.user,
             Some(UserSettings {
                 model: Some("llamacpp".into()),
-                permissions: Some(Permissions::Ask),
+                permissions: Some(Permissions::Full),
                 root: None,
             })
         );
@@ -423,7 +423,7 @@ mod tests {
         };
         let text = mock.text(&["todo".to_owned()]).unwrap();
         assert!(text.contains("model = \"mock\""), "{text}");
-        assert!(text.contains("permissions = \"ask\""), "{text}");
+        assert!(text.contains("permissions = \"full\""), "{text}");
         assert!(text.contains("features = [\"todo\"]"), "{text}");
 
         let refused = [

@@ -178,6 +178,10 @@ folds them into `rah.toml` and removes them. UI state (preferences, layout,
 recent workspaces and the connected API group) stays in `storage`.
 ### 6. First start
 
+Amended 2026-11-23: user settings default to `full` for assigned tools.
+This applies at first start and when a user configuration omits `permissions`.
+Named presets keep the policy described in ADR 0064.
+
 Amended 2026-11-18: local llama.cpp is the default model. When a user-key
 configuration omits `model`, or no configuration exists, command preparation
 mounts `model-llamacpp` with its loopback endpoint `http://127.0.0.1:8080`.
