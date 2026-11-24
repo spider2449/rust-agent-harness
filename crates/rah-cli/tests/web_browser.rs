@@ -2604,6 +2604,11 @@ async fn settings_manage_skills_in_the_browser() {
     );
     page.eval("window.confirm = () => true; document.querySelector('[aria-label=\"Delete tea-time\"]').click(); true").await;
     page.wait("skill deleted", "byId('settings-message').textContent === 'Deleted tea-time.' && !document.querySelector('[aria-label=\"Delete tea-time\"]')").await;
+    page.wait(
+        "empty local skills list",
+        "byId('settings-body').textContent.includes('No local skills. Skills installed from repositories appear under Skill packages.')",
+    )
+    .await;
     assert!(page.errors().is_empty());
 }
 

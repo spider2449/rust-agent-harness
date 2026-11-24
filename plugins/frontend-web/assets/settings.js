@@ -645,7 +645,7 @@ function skillsForm() {
   add.type = "submit";
   form.append(field("Skill name", name, "Use lowercase letters, digits, hyphens or underscores."),
     field("Instructions (Markdown)", body), add);
-  page.append(el("h3", "section-title", "Installed skills"), list,
+  page.append(el("h3", "section-title", "Local skills"), list,
     el("h3", "section-title", "Add skill"), form);
   page.append(packageSettings());
 
@@ -656,7 +656,7 @@ function skillsForm() {
       const names = await api("/skills");
       if (current !== revision) return;
       list.replaceChildren();
-      if (!names.length) list.append(el("p", "hint", "No skills installed."));
+      if (!names.length) list.append(el("p", "hint", "No local skills. Skills installed from repositories appear under Skill packages."));
       for (const skill of names) {
         const row = el("div", "skill-row");
         const remove = el("button", "ghost", "Delete");
