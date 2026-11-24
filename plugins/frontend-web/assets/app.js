@@ -1283,12 +1283,16 @@ function renderUsage() {
   if (!total) return;
   item.textContent = `${formatTokens(total.input)} in · ${formatTokens(total.output)} out`;
   const { input_tokens: input, context_window_tokens: capacity } = total.lastUsage;
-  const hasContext = Number.isSafeInteger(input) && input >= 0
+  const hasInput = Number.isSafeInteger(input) && input >= 0;
+  const hasContext = hasInput
     && Number.isSafeInteger(capacity) && capacity > 0;
   if (hasContext) {
     const percent = (100 * input / capacity).toFixed(1);
     context.textContent = `Context ${percent}%`;
     context.title = `Latest request input: ${input} of ${capacity} context tokens.`;
+  } else if (hasInput) {
+    context.textContent = `Context ${formatTokens(input)} tokens`;
+    context.title = `Latest request input: ${input} tokens. The provider did not report the context capacity.`;
   }
   item.title = (hasContext ? `Latest request input: ${input} of ${capacity} context tokens.\n` : "")
     + `Tokens the model reported for this session since the page was opened: `

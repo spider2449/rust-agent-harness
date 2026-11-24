@@ -1239,7 +1239,7 @@ async fn the_web_ui_works_in_a_real_browser() {
     );
 
     // A smaller subsequent prompt (e.g. after compaction) lowers the percentage.
-    for (usage, prefix) in [
+    for (usage, expected) in [
         (
             json!({"input_tokens": 500, "context_window_tokens": 1000}),
             "Context 50.0%",
@@ -1248,17 +1248,14 @@ async fn the_web_ui_works_in_a_real_browser() {
             json!({"input_tokens": 125, "context_window_tokens": 1000}),
             "Context 12.5%",
         ),
-        (json!({"input_tokens": 42}), ""),
+        (json!({"input_tokens": 42}), "Context 42 tokens"),
+        (json!({"output_tokens": 10}), "Context —"),
     ] {
         let status = page.eval(&format!(
             "onEvent(state.current, {{type:'model_usage',usage:{usage}}}); byId('context-usage').textContent"
         )).await;
         let status = status.as_str().unwrap();
-        if prefix.is_empty() {
-            assert!(!status.contains('%'), "{status}");
-        } else {
-            assert!(status.starts_with(prefix), "{status}");
-        }
+        assert_eq!(status, expected);
     }
 
     // Enter sends; the textarea does not keep a newline.

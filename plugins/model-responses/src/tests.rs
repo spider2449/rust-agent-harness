@@ -356,7 +356,7 @@ fn llama_discovery(models: &[&str]) -> Vec<Reply> {
         Reply::Json(200, json!({"status":"ok"})),
         Reply::Json(
             200,
-            json!({"data": models.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()}),
+            json!({"data": models.iter().map(|id| json!({"id": id, "meta": {"n_ctx": 4096}})).collect::<Vec<_>>()}),
         ),
     ]
 }
@@ -438,6 +438,47 @@ async fn llamacpp_reports_the_selected_models_runtime_context_capacity() {
             .any(|event| matches!(event, ModelEvent::Usage { usage }
         if usage.input_tokens == Some(128) && usage.context_window_tokens == Some(8192)))
     );
+}
+
+#[tokio::test]
+async fn llamacpp_reads_optional_runtime_capacity_from_model_props_once() {
+    let mut events = text_events("hi");
+    events.last_mut().unwrap()["response"]["usage"] = json!({"input_tokens": 128});
+    for (props, expected) in [
+        (
+            Reply::Json(200, json!({"default_generation_settings":{"n_ctx":8192}})),
+            Some(8192),
+        ),
+        (Reply::Status(404, "application/json"), None),
+    ] {
+        let server = Server::new(vec![
+            Reply::Json(200, json!({"status":"ok"})),
+            Reply::Json(
+                200,
+                json!({"data":[{"id":"org/model","meta":{"n_ctx_train":131072}}]}),
+            ),
+            props,
+            Reply::Sse(frames(&events)),
+            Reply::Sse(frames(&events)),
+        ])
+        .await;
+        let model =
+            ResponsesModel::llamacpp(server.origin.clone(), KEY.into(), LlamaConfig::default())
+                .unwrap();
+        for _ in 0..2 {
+            let result = collect(&model, request(user("hi"))).await.unwrap();
+            assert!(
+                result
+                    .iter()
+                    .any(|event| matches!(event, ModelEvent::Usage { usage }
+                if usage.input_tokens == Some(128) && usage.context_window_tokens == expected))
+            );
+        }
+        let requests = server.requests();
+        assert!(requests[2].0.starts_with("GET /props?model=org%2Fmodel "));
+        assert!(requests[2].0.contains(&format!("Bearer {KEY}")));
+        assert_eq!(requests.len(), 5);
+    }
 }
 
 #[tokio::test]
@@ -551,7 +592,7 @@ async fn llamacpp_sends_images_only_to_a_model_listed_with_image_input() {
             Reply::Json(200, json!({"status":"ok"})),
             Reply::Json(
                 200,
-                json!({"data": [{"id": "m", "architecture": {"input_modalities": modalities}}]}),
+                json!({"data": [{"id": "m", "meta": {"n_ctx": 4096}, "architecture": {"input_modalities": modalities}}]}),
             ),
             Reply::Sse(frames(&text_events("seen"))),
         ])

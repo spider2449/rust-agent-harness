@@ -97,7 +97,7 @@ async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
         (
             200,
             "application/json",
-            json!({"data":[{"id":"local-model"}]}).to_string(),
+            json!({"data":[{"id":"local-model","meta":{"n_ctx":4096}}]}).to_string(),
         ),
         (200, "text/event-stream", echo_call()),
         (200, "text/event-stream", text("echo said hello")),

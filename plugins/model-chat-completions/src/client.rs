@@ -18,6 +18,8 @@ use crate::{
 
 const MAX_CHUNKS: usize = 65_536;
 const DISCOVERY_LIMIT: usize = 256 * 1024;
+// The props response can include the entire chat template.
+const PROPS_LIMIT: usize = 1024 * 1024;
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Request settings that do not depend on the conversation.
@@ -32,6 +34,7 @@ pub(crate) struct Settings {
     pub enable_thinking: Option<bool>,
     /// Whether the server is on this machine: no proxy is used.
     pub loopback: bool,
+    pub llamacpp: bool,
 }
 
 /// An OpenAI-compatible Chat Completions model. Credentials are never exposed
@@ -43,6 +46,8 @@ pub struct ChatCompletionsModel {
     /// The served model, discovered lazily when none is configured and
     /// dropped on transport errors.
     discovered: Mutex<Option<String>>,
+    /// Last llama.cpp model and its optional runtime capacity.
+    capacity: Mutex<Option<(String, Option<u64>)>>,
 }
 
 impl ChatCompletionsModel {
@@ -67,6 +72,7 @@ impl ChatCompletionsModel {
             key,
             settings,
             discovered: Mutex::new(None),
+            capacity: Mutex::new(None),
         })
     }
 
@@ -98,26 +104,7 @@ impl ChatCompletionsModel {
     /// `GET <base_url>/models`: the sole served model.
     async fn discover(&self) -> Result<String, E> {
         let url = format!("{}/models", self.settings.base_url);
-        let response = self
-            .authorized(self.client.get(url))
-            .send()
-            .await
-            .map_err(|_| E::Unreachable)?;
-        match response.status().as_u16() {
-            200 => {}
-            401 | 403 => return Err(E::Authentication),
-            status => return Err(E::HttpStatus(status)),
-        }
-        let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| E::Unreachable)?;
-            if bytes.len() + chunk.len() > DISCOVERY_LIMIT {
-                return Err(E::Protocol);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let catalog: Value = serde_json::from_slice(&bytes).map_err(|_| E::ChunkJson)?;
+        let catalog = self.get_json(&url, DISCOVERY_LIMIT).await?;
         let mut ids: Vec<&str> = Vec::new();
         for item in catalog["data"].as_array().ok_or(E::Protocol)? {
             let id = item["id"].as_str().ok_or(E::Protocol)?;
@@ -134,8 +121,63 @@ impl ChatCompletionsModel {
         }
     }
 
+    async fn get_json(&self, url: &str, limit: usize) -> Result<Value, E> {
+        let response = self
+            .authorized(self.client.get(url))
+            .send()
+            .await
+            .map_err(|_| E::Unreachable)?;
+        match response.status().as_u16() {
+            200 => {}
+            401 | 403 => return Err(E::Authentication),
+            status => return Err(E::HttpStatus(status)),
+        }
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| E::Unreachable)?;
+            if bytes.len() + chunk.len() > limit {
+                return Err(E::Protocol);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| E::ChunkJson)
+    }
+
+    async fn context_capacity(&self, model: &str) -> Option<u64> {
+        if !self.settings.llamacpp {
+            return None;
+        }
+        let mut cache = self.capacity.lock().await;
+        if let Some((id, capacity)) = cache.as_ref()
+            && id == model
+        {
+            return *capacity;
+        }
+        let base = self
+            .settings
+            .base_url
+            .strip_suffix("/v1")
+            .unwrap_or(&self.settings.base_url);
+        let url =
+            reqwest::Url::parse_with_params(&format!("{base}/props"), &[("model", model)]).ok()?;
+        let props = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.get_json(url.as_str(), PROPS_LIMIT),
+        )
+        .await;
+        let capacity = props
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|props| props["default_generation_settings"]["n_ctx"].as_u64())
+            .filter(|n| *n > 0);
+        *cache = Some((model.to_owned(), capacity));
+        capacity
+    }
+
     async fn forget_discovery(&self) {
         *self.discovered.lock().await = None;
+        *self.capacity.lock().await = None;
     }
 
     fn body(&self, model: String, request: &ModelRequest, names: &ToolNames) -> Result<Value, E> {
@@ -208,6 +250,11 @@ impl ModelProvider for ChatCompletionsModel {
             }
         };
         let names = ToolNames::new(&request.tools);
+        let capacity = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ModelError::Cancelled),
+            capacity = self.context_capacity(&model) => capacity,
+        };
         let body = self.body(model, &request, &names)?;
         let post = self
             .authorized(
@@ -252,7 +299,7 @@ impl ModelProvider for ChatCompletionsModel {
         if !event_stream {
             return Err(E::Protocol.into());
         }
-        Ok(Box::pin(events(response, names, cancel)))
+        Ok(Box::pin(events(response, names, cancel, capacity)))
     }
 }
 
@@ -260,6 +307,7 @@ fn events(
     response: reqwest::Response,
     names: ToolNames,
     cancel: CancellationToken,
+    capacity: Option<u64>,
 ) -> impl Stream<Item = Result<ModelEvent, ModelError>> + Send + 'static {
     async_stream::try_stream! {
         let mut bytes = response.bytes_stream();
@@ -322,7 +370,8 @@ fn events(
                 arguments,
             };
         }
-        if let Some(usage) = parsed.usage() {
+        if let Some(mut usage) = parsed.usage() {
+            usage.context_window_tokens = capacity;
             yield ModelEvent::Usage { usage };
         }
         yield ModelEvent::Completed;

@@ -185,6 +185,7 @@ fn settings(server: &Server, model: Option<&str>) -> Settings {
         max_tokens: None,
         temperature: None,
         enable_thinking: None,
+        llamacpp: false,
         loopback,
     }
 }
@@ -466,6 +467,35 @@ async fn failures_are_typed_and_carry_no_secrets() {
 }
 
 #[tokio::test]
+async fn llamacpp_chat_uses_the_selected_models_runtime_capacity() {
+    let server = Server::new(vec![
+        Reply::Json(200, json!({"default_generation_settings":{"n_ctx":8192}})),
+        Reply::Sse(text_reply("hi")),
+        Reply::Sse(text_reply("again")),
+    ])
+    .await;
+    let config: Config = serde_json::from_value(json!({
+        "provider":"llamacpp", "base_url":format!("{}/proxy/v1", server.origin), "model":"org/model"
+    }))
+    .unwrap();
+    let model = model(config.resolve().unwrap().0);
+    for _ in 0..2 {
+        let result = collect(&model, request(user("hi"), vec![])).await.unwrap();
+        assert!(
+            result
+                .iter()
+                .any(|event| matches!(event, ModelEvent::Usage { usage }
+            if usage.input_tokens == Some(12) && usage.context_window_tokens == Some(8192)))
+        );
+    }
+    assert!(
+        server.requests()[0]
+            .0
+            .starts_with("GET /proxy/props?model=org%2Fmodel ")
+    );
+}
+
+#[tokio::test]
 async fn an_unreachable_server_is_a_transport_error() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -477,6 +507,7 @@ async fn an_unreachable_server_is_a_transport_error() {
         max_tokens: None,
         temperature: None,
         enable_thinking: None,
+        llamacpp: false,
         loopback,
     });
     let error = collect(&model, request(user("x"), Vec::new()))
@@ -672,6 +703,7 @@ async fn health_reports_reachable_unauthorized_and_down_servers() {
         max_tokens: None,
         temperature: None,
         enable_thinking: None,
+        llamacpp: false,
         loopback,
     });
     assert!(matches!(

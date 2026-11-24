@@ -245,6 +245,7 @@ impl Config {
             temperature: self.temperature,
             enable_thinking: self.enable_thinking,
             loopback,
+            llamacpp: provider.is_some_and(|p| p.name == "llamacpp"),
         };
         // A required key is always sent; an optional one is checked when it
         // is read.

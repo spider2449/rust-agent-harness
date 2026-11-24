@@ -19,6 +19,8 @@ use crate::{
 pub(crate) const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 const MAX_EVENTS: usize = 32_768;
 const DISCOVERY_LIMIT: usize = 64 * 1024;
+// The props response can include the entire chat template.
+const PROPS_LIMIT: usize = 1024 * 1024;
 
 enum Flavor {
     OpenAi {
@@ -39,6 +41,7 @@ struct Served {
     /// Whether `/v1/models` lists image input for it.
     images: bool,
     context_window_tokens: Option<u64>,
+    checked_props: bool,
 }
 
 /// A Responses API model. Credentials are never exposed through Debug,
@@ -161,6 +164,7 @@ impl ResponsesModel {
                 id: requested.unwrap_or_else(|| model.clone()),
                 images: true,
                 context_window_tokens: None,
+                checked_props: false,
             }),
             Flavor::LlamaCpp {
                 origin,
@@ -171,13 +175,32 @@ impl ResponsesModel {
                 if cache.is_none() {
                     *cache = Some(self.discover(origin).await?);
                 }
-                let served = cache.as_deref().unwrap_or_default();
+                let served = cache.as_deref_mut().unwrap_or_default();
                 let found = match requested.or_else(|| model.clone()) {
-                    Some(model) => served.iter().find(|served| served.id == model),
-                    None if served.len() == 1 => served.first(),
+                    Some(model) => served.iter_mut().find(|served| served.id == model),
+                    None if served.len() == 1 => served.first_mut(),
                     None => None,
                 };
-                found.cloned().ok_or(E::ModelUnavailable)
+                let found = found.ok_or(E::ModelUnavailable)?;
+                if found.context_window_tokens.is_none() && !found.checked_props {
+                    let url = reqwest::Url::parse_with_params(
+                        &format!("{origin}/props"),
+                        &[("model", &found.id)],
+                    )
+                    .map_err(|_| E::Protocol)?;
+                    if let Ok(Ok(props)) = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        self.get_json(url.into(), true, PROPS_LIMIT),
+                    )
+                    .await
+                    {
+                        found.context_window_tokens = props["default_generation_settings"]["n_ctx"]
+                            .as_u64()
+                            .filter(|n| *n > 0);
+                    }
+                    found.checked_props = true;
+                }
+                Ok(found.clone())
             }
         }
     }
@@ -188,7 +211,7 @@ impl ResponsesModel {
         }
     }
 
-    async fn get_json(&self, url: String, authenticated: bool) -> Result<Value, E> {
+    async fn get_json(&self, url: String, authenticated: bool, limit: usize) -> Result<Value, E> {
         let mut request = self.client.get(url);
         if authenticated && !self.key.is_empty() {
             request = request.bearer_auth(&self.key);
@@ -204,7 +227,7 @@ impl ResponsesModel {
         let mut bytes = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| E::Unreachable)?;
-            if bytes.len() + chunk.len() > DISCOVERY_LIMIT {
+            if bytes.len() + chunk.len() > limit {
                 return Err(E::Protocol);
             }
             bytes.extend_from_slice(&chunk);
@@ -215,11 +238,15 @@ impl ResponsesModel {
     /// llama-server readiness (`/health`) and served models (`/v1/models`).
     async fn discover(&self, origin: &str) -> Result<Vec<Served>, E> {
         let discovery = async {
-            let health = self.get_json(format!("{origin}/health"), false).await?;
+            let health = self
+                .get_json(format!("{origin}/health"), false, DISCOVERY_LIMIT)
+                .await?;
             if health["status"] != "ok" {
                 return Err(E::Loading);
             }
-            let catalog = self.get_json(format!("{origin}/v1/models"), true).await?;
+            let catalog = self
+                .get_json(format!("{origin}/v1/models"), true, DISCOVERY_LIMIT)
+                .await?;
             let mut models: Vec<Served> = Vec::new();
             for item in catalog["data"].as_array().ok_or(E::Protocol)? {
                 let id = item["id"].as_str().ok_or(E::Protocol)?;
@@ -233,6 +260,7 @@ impl ResponsesModel {
                     models.push(Served {
                         id: id.to_owned(),
                         images,
+                        checked_props: false,
                         context_window_tokens: item["meta"]["n_ctx"].as_u64().filter(|n| *n > 0),
                     });
                 }
