@@ -1650,13 +1650,24 @@ async fn the_web_ui_works_in_a_real_browser() {
         .await;
     assert_eq!(
         page.eval(&format!("{menu}.length")).await,
-        10,
+        11,
         "{}",
         page.eval(menu).await
     );
     page.screenshot("slash-menu").await;
     page.eval(&key("Escape")).await;
     assert_eq!(page.eval("shown(byId('slash-menu'))").await, false);
+    page.eval(&typing("/sk")).await;
+    assert_eq!(page.eval(menu).await, json!(["/skills"]));
+    page.eval(&key("Tab")).await;
+    assert_eq!(page.eval("byId('input').value").await, "/skills");
+    page.eval(&key("Enter")).await;
+    page.wait(
+        "Skills settings opened from the composer",
+        "byId('settings-dialog').open && document.querySelector('#settings-tabs .current')?.dataset.tab === 'skills' && byId('input').value === ''",
+    )
+    .await;
+    page.eval("byId('settings-close').click(); true").await;
     page.eval(&typing("/st")).await;
     assert_eq!(
         page.eval(menu).await,

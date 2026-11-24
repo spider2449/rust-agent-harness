@@ -87,6 +87,13 @@ async fn requests_list_the_skills_after_leading_system_items() {
         panic!("{items:?}")
     };
     assert!(
+        text.contains(&format!(
+            "configured skills directory `{}`",
+            dir.0.display()
+        )),
+        "{text}"
+    );
+    assert!(
         text.contains("- commit-message: Writes commit messages.\n"),
         "{text}"
     );

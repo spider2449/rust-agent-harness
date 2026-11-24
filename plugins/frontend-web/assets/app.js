@@ -1052,6 +1052,7 @@ async function startTurn(input) {
 const SLASH_COMMANDS = [
   { name: "/new", usage: "/new", help: "Start a new session" },
   { name: "/plugins", usage: "/plugins", help: "Show the Plugins panel" },
+  { name: "/skills", usage: "/skills", help: "Open Skills settings" },
   {
     name: "/stop", usage: "/stop <plugin>", help: "Stop a plugin, keeping its configuration",
     // Policy plugins guard tool calls; the server refuses to stop them.
@@ -1208,6 +1209,9 @@ async function runSlash(input) {
         break;
       case "/plugins":
         showPanel("plugins");
+        break;
+      case "/skills":
+        await openSettings("skills");
         break;
       case "/stop": {
         const plugin = (slash.plugins || []).find((p) => p.id === argument);

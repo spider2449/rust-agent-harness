@@ -113,14 +113,14 @@ impl Plugin for SkillsPlugin {
                         .iter()
                         .position(|item| !matches!(item, ContextItem::System { .. }))
                         .unwrap_or(request.items.len());
+                    let mut text = lister.listing(&skills);
+                    if let Some(instructions) = startup {
+                        text.push_str("\nSuperpowers startup instructions (use skills.load for the Skill tool):\n");
+                        text.push_str(&instructions);
+                    }
                     request.items.insert(
                         at,
-                        ContextItem::System {
-                            text: match startup {
-                                Some(instructions) => format!("{}\nSuperpowers startup instructions (use skills.load for the Skill tool):\n{instructions}", listing(&skills)),
-                                None => listing(&skills),
-                            },
-                        },
+                        ContextItem::System { text },
                     );
                 }
                 request
@@ -183,17 +183,6 @@ pub fn parse(text: &str) -> (Option<String>, Option<String>, &str) {
     (None, None, text)
 }
 
-fn listing(skills: &[Skill]) -> String {
-    let mut text = String::from(
-        "Skills are available. Call skills.load with a skill's name to read its full \
-         instructions before following them:\n",
-    );
-    for skill in skills {
-        text.push_str(&format!("- {}: {}\n", skill.name, skill.description));
-    }
-    text
-}
-
 /// Front matter opened by a `---` line and never closed.
 fn unclosed_front_matter(text: &str) -> bool {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -217,6 +206,20 @@ struct Library {
 }
 
 impl Library {
+    fn listing(&self, skills: &[Skill]) -> String {
+        let mut text = format!(
+            "Available RAH skills from the configured skills directory `{}` (including packages). \
+             This list is refreshed for each model request. Answer skill discovery questions from \
+             these names and descriptions without searching the filesystem. To use a matching \
+             skill, call skills.load with its exact listed name and read its instructions:\n",
+            self.dir.display()
+        );
+        for skill in skills {
+            text.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+        }
+        text
+    }
+
     /// The text of `<dir>/<directory>/SKILL.md`, if it is a bounded regular
     /// file.
     async fn read(&self, directory: &str) -> Option<String> {
