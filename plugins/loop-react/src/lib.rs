@@ -28,7 +28,7 @@ use std::sync::Arc;
 use futures::{StreamExt, channel::mpsc};
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
-    agent_loop::{AgentLoop, LOOP, RunningTurns, TURN_RUNNING, TurnEvent, TurnRequest, TurnStream},
+    agent_loop::{AgentLoop, LOOP, RunningTurn, RunningTurns, TurnEvent, TurnRequest, TurnStream},
     async_trait,
     hooks::ModelBeforeRequest,
     kernel::Spawner,
@@ -56,7 +56,13 @@ impl ReactLoopPlugin {
             manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
                 .provides(["loop"])
                 .requires(["session"])
-                .optional(["model", "workspace-turns", "sandbox"]),
+                .optional([
+                    "model",
+                    "workspace-turns",
+                    "sandbox",
+                    "running-turns",
+                    "file-undo",
+                ]),
         }
     }
 }
@@ -87,7 +93,9 @@ impl Plugin for ReactLoopPlugin {
             kernel: scope.kernel(),
             session: scope.inject(SESSION)?,
             spawner: scope.spawner(),
-            running: RunningTurns::default(),
+            running: scope
+                .inject_optional(rah_api::agent_loop::RUNNING_TURNS)?
+                .unwrap_or_default(),
             max_rounds: config.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS).max(1),
             retry: RetryPolicy::from_settings(config.retries, config.retry_delay_ms)?,
         };
@@ -100,7 +108,7 @@ struct ReactLoop {
     kernel: KernelHandle,
     session: Arc<dyn SessionLog>,
     spawner: Spawner,
-    running: RunningTurns,
+    running: Arc<RunningTurns>,
     max_rounds: u32,
     retry: RetryPolicy,
 }
@@ -109,15 +117,19 @@ impl AgentLoop for ReactLoop {
     fn run_turn(&self, request: TurnRequest) -> TurnStream {
         let (sender, receiver) = mpsc::unbounded();
         // One turn per session: a second one records nothing.
-        let Some(running) = self.running.begin(&request.session) else {
-            let _ = sender.unbounded_send(AgentEvent::Failed {
-                session_id: request.session,
-                code: AgentErrorCode::InvalidRequest,
-                message: TURN_RUNNING.into(),
-            });
-            return Box::pin(receiver);
+        let running = match self.running.admit(&request.session) {
+            Ok(guard) => guard,
+            Err(reason) => {
+                let _ = sender.unbounded_send(AgentEvent::Failed {
+                    session_id: request.session,
+                    code: AgentErrorCode::InvalidRequest,
+                    message: reason.into(),
+                });
+                return Box::pin(receiver);
+            }
         };
         let turn = Turn {
+            origin: request.origin,
             kernel: self.kernel.clone(),
             session: self.session.clone(),
             max_rounds: self.max_rounds,
@@ -130,8 +142,7 @@ impl AgentLoop for ReactLoop {
         };
         let input = request.input;
         let spawned = self.spawner.spawn(async move {
-            let _running = running;
-            turn.run(input).await;
+            turn.run(input, running).await;
         });
         if !spawned {
             let _ = sender.unbounded_send(AgentEvent::Failed {
@@ -177,6 +188,7 @@ enum Ended {
 }
 
 struct Turn {
+    origin: rah_api::agent_loop::TurnOrigin,
     kernel: KernelHandle,
     session: Arc<dyn SessionLog>,
     max_rounds: u32,
@@ -207,7 +219,7 @@ impl Turn {
             .map_err(|error| failure(AgentErrorCode::Session, error.to_string()))
     }
 
-    async fn run(self, input: String) {
+    async fn run(self, input: String, running: RunningTurn) {
         let history = match rah_api::agent_loop::open_turn_history(
             &self.kernel,
             self.session.as_ref(),
@@ -217,6 +229,7 @@ impl Turn {
         {
             Ok(opened) => opened,
             Err(message) => {
+                drop(running);
                 self.emit(AgentEvent::Failed {
                     session_id: self.sid.clone(),
                     code: AgentErrorCode::Session,
@@ -278,6 +291,7 @@ impl Turn {
                 }
             }
         };
+        drop(running);
         self.emit(terminal);
     }
 
@@ -287,11 +301,17 @@ impl Turn {
         history: &[rah_protocol::SessionRecord],
     ) -> Result<Ended, Failure> {
         let mut items = rebuild_context(history);
-        self.append(SessionEntry::TurnStarted {
-            turn: self.id.clone(),
-            input: input.clone(),
-        })
-        .await?;
+        let input = rah_api::undo::record_turn_start(
+            &self.kernel,
+            self.session.as_ref(),
+            &self.sid,
+            &self.id,
+            self.origin,
+            input,
+            history,
+        )
+        .await
+        .map_err(|error| failure(AgentErrorCode::Session, error.to_string()))?;
         items.push(ContextItem::User { text: input });
 
         let invoker = ToolInvoker::new(self.kernel.clone());

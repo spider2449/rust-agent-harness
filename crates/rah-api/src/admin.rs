@@ -48,6 +48,8 @@ pub struct PluginInstance {
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AdminError {
+    #[error(transparent)]
+    LoopBusy(#[from] crate::agent_loop::LoopBusy),
     #[error("unknown plugin kind `{0}`")]
     UnknownKind(String),
     #[error("plugin `{0}` is not mounted")]

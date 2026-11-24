@@ -30,7 +30,8 @@ impl From<AdminError> for ApiError {
         let status = match error {
             AdminError::UnknownKind(_) | AdminError::Failed(_) => StatusCode::BAD_REQUEST,
             AdminError::NotMounted(_) => StatusCode::NOT_FOUND,
-            AdminError::AlreadyMounted(_)
+            AdminError::LoopBusy(_)
+            | AdminError::AlreadyMounted(_)
             | AdminError::ReplacementFailed { .. }
             | AdminError::Stopped(_)
             | AdminError::NotStopped(_) => StatusCode::CONFLICT,

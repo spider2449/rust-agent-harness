@@ -347,6 +347,7 @@ async fn bounded_turn(handle: &KernelHandle, prompt: &str) -> (Vec<AgentEvent>, 
     let cancel = CancellationToken::new();
     let agent = handle.get(LOOP).unwrap();
     let mut stream = agent.run_turn(TurnRequest {
+        origin: rah_api::agent_loop::TurnOrigin::User,
         session,
         input: prompt.to_owned(),
         cancel: cancel.clone(),

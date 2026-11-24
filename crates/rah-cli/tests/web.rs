@@ -381,6 +381,43 @@ async fn loop_settings_preserve_a_turn_waiting_for_approval() {
             _ => {}
         }
     }
+    let job = web
+        .json(web.post("/api/jobs").json(&json!({"input":"scheduled"})))
+        .await;
+    let approval = loop {
+        let message = next_json(&mut socket).await;
+        if message["type"] == "approval_required" {
+            break message["id"].clone();
+        }
+    };
+    assert_eq!(web.status(replace()).await.0, 409);
+    let configure = web
+        .request(reqwest::Method::PUT, "/api/settings/loop")
+        .json(&json!({"id":"loop-react","kind":"loop-react","config":{"max_rounds":3}}));
+    assert_eq!(web.status(configure).await.0, 409);
+    send(
+        &mut socket,
+        json!({"type":"approval","id":approval,"approve":true}),
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let jobs = web.json(web.get("/api/jobs")).await;
+            let state = jobs
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == job["id"])
+                .unwrap();
+            if state["state"] == "done" {
+                break;
+            }
+            assert_eq!(state["state"], "running", "{state}");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(web.json(replace()).await["state"], "active");
 }
 

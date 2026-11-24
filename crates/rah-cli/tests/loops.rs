@@ -282,6 +282,7 @@ async fn both_loops_pin_the_workspace_while_a_tool_runs() {
         let handle = kernel.handle();
         let session = new_session(&handle).await;
         let mut events = handle.get(LOOP).unwrap().run_turn(TurnRequest {
+            origin: rah_api::agent_loop::TurnOrigin::User,
             session: session.clone(),
             input: "/call gate {}".into(),
             cancel: rah_api::CancellationToken::new(),
@@ -323,5 +324,182 @@ async fn both_loops_pin_the_workspace_while_a_tool_runs() {
             turn(&handle, &session, "hello").await.last(),
             Some(AgentEvent::Completed { .. })
         ));
+    }
+}
+
+/// Inject failures on either side of the durable TurnStarted write.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartFault {
+    None,
+    WrongWorkspace,
+    BeforeAppend,
+    AfterAppend,
+}
+
+struct ControlledLog {
+    manifest: rah_api::PluginManifest,
+    log: std::sync::Arc<dyn rah_api::session::SessionLog>,
+}
+
+#[rah_api::async_trait]
+impl rah_api::Plugin for ControlledLog {
+    fn manifest(&self) -> &rah_api::PluginManifest {
+        &self.manifest
+    }
+    async fn apply(&self, scope: &mut rah_api::Scope) -> Result<(), rah_api::PluginError> {
+        scope.provide(rah_api::session::SESSION, self.log.clone())?;
+        Ok(())
+    }
+}
+
+struct FaultyStarts {
+    inner: std::sync::Arc<dyn rah_api::session::SessionLog>,
+    fault: std::sync::Arc<std::sync::Mutex<StartFault>>,
+}
+use rah_api::session::{SESSION, SessionError, SessionLog};
+use rah_protocol::{SessionEntry, SessionId, SessionInfo, SessionRecord};
+#[rah_api::async_trait]
+impl SessionLog for FaultyStarts {
+    async fn create(&self) -> Result<SessionInfo, SessionError> {
+        self.inner.create().await
+    }
+    async fn read(&self, id: &SessionId) -> Result<Vec<SessionRecord>, SessionError> {
+        self.inner.read(id).await
+    }
+    async fn fork(&self, id: &SessionId, at: u64) -> Result<SessionInfo, SessionError> {
+        self.inner.fork(id, at).await
+    }
+    async fn list(&self) -> Result<Vec<SessionInfo>, SessionError> {
+        self.inner.list().await
+    }
+    async fn turn_history(
+        &self,
+        id: &SessionId,
+    ) -> Result<(Vec<SessionRecord>, Option<String>), SessionError> {
+        let (records, mut root) = self.inner.turn_history(id).await?;
+        if *self.fault.lock().unwrap() == StartFault::WrongWorkspace {
+            root = Some("inactive-workspace".into());
+        }
+        Ok((records, root))
+    }
+    async fn append(&self, id: &SessionId, entry: SessionEntry) -> Result<u64, SessionError> {
+        let fault = if matches!(entry, SessionEntry::TurnStarted { .. }) {
+            *self.fault.lock().unwrap()
+        } else {
+            StartFault::None
+        };
+        if fault == StartFault::BeforeAppend {
+            return Err(SessionError::Io("injected before append".into()));
+        }
+        let seq = self.inner.append(id, entry).await?;
+        if fault == StartFault::AfterAppend {
+            return Err(SessionError::Io("injected after append".into()));
+        }
+        Ok(seq)
+    }
+}
+
+#[tokio::test]
+async fn user_turns_record_undo_notes_once_across_admission_and_append_failures() {
+    use futures::StreamExt;
+    use rah_api::agent_loop::{LOOP, TurnOrigin, TurnRequest};
+    use std::sync::{Arc, Mutex};
+    for kind in ["loop-react", "loop-plan"] {
+        let dir = TempDir::new(&format!("notes-{kind}"));
+        let mut distribution = headless(&dir);
+        distribution.set_config("policy-authority", "approve", json!(["repo.create-file"]));
+        let kernel = kernel(&distribution).await;
+        let handle = kernel.handle();
+        let inner = handle.get(SESSION).unwrap();
+        let fault = Arc::new(Mutex::new(StartFault::None));
+        kernel
+            .mount(
+                Arc::new(ControlledLog {
+                    manifest: rah_api::PluginManifest::new("controlled-log", "1")
+                        .provides(["session"]),
+                    log: Arc::new(FaultyStarts {
+                        inner: inner.clone(),
+                        fault: fault.clone(),
+                    }),
+                }),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        handle
+            .get(ADMIN)
+            .unwrap()
+            .mount(MountRequest {
+                kind: kind.into(),
+                id: Some("notes-loop".into()),
+                bind: [("session".into(), "controlled-log".into())].into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let agent = handle.get_instance(LOOP, "notes-loop").unwrap();
+        for failure in [StartFault::BeforeAppend, StartFault::AfterAppend] {
+            let sid = new_session(&handle).await;
+            turn(
+                &handle,
+                &sid,
+                r#"/call repo.create-file {"path":"note.txt","content":"note"}"#,
+            )
+            .await;
+            rah_api::undo::undo_newest(&handle, &sid)
+                .await
+                .unwrap()
+                .unwrap();
+            let start = |origin, input: &str| {
+                agent.run_turn(TurnRequest {
+                    origin,
+                    session: sid.clone(),
+                    input: input.into(),
+                    cancel: Default::default(),
+                })
+            };
+            let background = start(TurnOrigin::Background, "background");
+            let busy: Vec<_> = start(TurnOrigin::User, "busy").collect().await;
+            assert!(matches!(busy.as_slice(), [AgentEvent::Failed { .. }]));
+            background.collect::<Vec<_>>().await;
+            *fault.lock().unwrap() = StartFault::WrongWorkspace;
+            let refused = start(TurnOrigin::User, "wrong workspace")
+                .collect::<Vec<_>>()
+                .await;
+            assert!(matches!(refused.last(), Some(AgentEvent::Failed { .. })));
+            *fault.lock().unwrap() = failure;
+            let failed = start(TurnOrigin::User, "first").collect::<Vec<_>>().await;
+            assert!(matches!(failed.last(), Some(AgentEvent::Failed { .. })));
+            *fault.lock().unwrap() = StartFault::None;
+            assert!(matches!(
+                start(TurnOrigin::User, "retry")
+                    .collect::<Vec<_>>()
+                    .await
+                    .last(),
+                Some(AgentEvent::Completed { .. })
+            ));
+            start(TurnOrigin::User, "later").collect::<Vec<_>>().await;
+            let inputs: Vec<_> = inner
+                .read(&sid)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter_map(|r| match r.entry {
+                    SessionEntry::TurnStarted { input, .. }
+                        if input.contains("[RAH: the user undid") =>
+                    {
+                        Some(input)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(inputs.len(), 1, "{kind}: {inputs:?}");
+            let expected = if failure == StartFault::BeforeAppend {
+                "retry"
+            } else {
+                "first"
+            };
+            assert!(inputs[0].ends_with(expected), "{kind}: {inputs:?}");
+        }
     }
 }

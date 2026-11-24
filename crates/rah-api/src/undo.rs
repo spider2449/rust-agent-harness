@@ -6,11 +6,26 @@
 //! request; it is not a tool, so the model cannot. An undo restores the
 //! newest change of a session only when every file is still what the change
 //! left, and leaves a note that the next turn's input carries to the model
-//! ([`with_notes`]).
+//! ([`record_turn_start`]).
 
 use async_trait::async_trait;
 use rah_kernel::{KernelHandle, ServiceKey};
-use rah_protocol::SessionId;
+use rah_protocol::{RequestId, SessionEntry, SessionId, SessionRecord, ToolCallId};
+use std::path::Path;
+
+/// Holds the owning writer's file lock while a formatter runs. On success
+/// the formatter supplies the bytes it actually read before and after.
+/// Dropping the callback releases the lock without changing the history.
+pub type FormatReceipt = Box<dyn FnOnce(&[u8], Vec<u8>) + Send>;
+
+pub enum FormatClaim {
+    /// This provider has no record for the call and file.
+    Untracked,
+    /// The recorded file has changed since the call. Skip formatting it.
+    Changed,
+    /// Run the formatter while holding this receipt.
+    Tracked(FormatReceipt),
+}
 
 /// Service name `file-undo` providers declare in their manifest's `provides`.
 pub const FILE_UNDO_SERVICE: &str = "file-undo";
@@ -84,11 +99,31 @@ pub enum UndoError {
 
 #[async_trait]
 pub trait FileUndo: Send + Sync {
+    /// Claims a formatter transition for a recorded call and canonical file.
+    async fn begin_format(
+        &self,
+        _call: &ToolCallId,
+        _relative: &str,
+        _canonical: &Path,
+    ) -> FormatClaim {
+        FormatClaim::Untracked
+    }
+
     /// The changes of a session that can be undone, newest first.
     fn changes(&self, session: &SessionId) -> Vec<FileChange>;
 
     /// Undoes the newest change of a session, all files or none.
     async fn undo_last(&self, session: &SessionId) -> Result<UndoReport, UndoError>;
+
+    /// Reserves notes for an admitted user turn. Reconcile an earlier
+    /// unacknowledged append against the history read for this session.
+    fn reserve_notes(
+        &self,
+        session: &SessionId,
+        turn: &RequestId,
+        history: &[SessionRecord],
+    ) -> Vec<String>;
+    fn acknowledge_notes(&self, session: &SessionId, turn: &RequestId);
 
     /// Takes the notes about undone changes the model has not seen yet.
     fn take_notes(&self, session: &SessionId) -> Vec<String>;
@@ -128,19 +163,43 @@ pub async fn undo_newest(
     })
 }
 
-/// `input` with the session's pending undo notes before it, for a turn the
-/// user starts. Without notes it is `input` unchanged.
-pub fn with_notes(kernel: &KernelHandle, session: &SessionId, input: String) -> String {
-    let notes: Vec<String> = kernel
-        .get_all(FILE_UNDO)
-        .into_iter()
-        .flat_map(|(_, provider)| provider.take_notes(session))
+/// Records the accepted input before acknowledging the notes included in it.
+/// An interrupted append leaves the reservation with its provider.
+pub async fn record_turn_start(
+    kernel: &KernelHandle,
+    log: &dyn crate::session::SessionLog,
+    session: &SessionId,
+    turn: &RequestId,
+    origin: crate::agent_loop::TurnOrigin,
+    input: String,
+    history: &[SessionRecord],
+) -> Result<String, crate::session::SessionError> {
+    let providers = if origin == crate::agent_loop::TurnOrigin::User {
+        kernel.get_all(FILE_UNDO)
+    } else {
+        Vec::new()
+    };
+    let notes: Vec<_> = providers
+        .iter()
+        .flat_map(|(_, p)| p.reserve_notes(session, turn, history))
         .collect();
-    if notes.is_empty() {
+    let input = if notes.is_empty() {
         input
     } else {
         format!("{}\n\n{input}", notes.join("\n"))
+    };
+    log.append(
+        session,
+        SessionEntry::TurnStarted {
+            turn: turn.clone(),
+            input: input.clone(),
+        },
+    )
+    .await?;
+    for (_, provider) in providers {
+        provider.acknowledge_notes(session, turn);
     }
+    Ok(input)
 }
 
 #[cfg(test)]

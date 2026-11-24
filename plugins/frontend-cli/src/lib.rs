@@ -745,9 +745,9 @@ where
     };
     let (cancel, _running) = terminal.running.begin();
     let mut events = agent_loop.run_turn(TurnRequest {
+        origin: rah_api::agent_loop::TurnOrigin::User,
         session: session.clone(),
-        // Tells the model about files the user undid since its last turn.
-        input: undo::with_notes(kernel, session, input.to_owned()),
+        input: input.to_owned(),
         cancel: cancel.clone(),
     });
     loop {

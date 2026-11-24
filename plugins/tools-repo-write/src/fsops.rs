@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use rah_api::tools::ToolError;
 use serde::Deserialize;
 
-use crate::undo::{Call, FileState, History, read_state};
+use crate::undo::{Call, FileImage, FileState, History};
 
 pub(crate) struct Root {
     pub path: PathBuf,
@@ -167,14 +167,15 @@ impl Root {
         }
         .await;
         written.map_err(|error| ToolError::Execution(format!("cannot write `{path}`: {error}")))?;
-        self.history.record(
+        self.record(
             call,
             vec![FileState {
                 path: path.to_owned(),
                 before: None,
                 after: Some(content.as_bytes().to_vec()),
             }],
-        );
+        )
+        .await;
         Ok(())
     }
 
@@ -184,22 +185,14 @@ impl Root {
         &self,
         target: &Path,
         shown: &str,
-        content: &[u8],
+        image: &FileImage,
     ) -> Result<(), String> {
         self.make_parents(target, shown)
             .await
             .map_err(|error| error.to_string())?;
-        let temporary = temporary_beside(target);
-        let result = async {
-            tokio::fs::write(&temporary, content).await?;
-            tokio::fs::rename(&temporary, target).await
-        }
-        .await;
-        if let Err(error) = result {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            return Err(format!("cannot write `{shown}`: {error}"));
-        }
-        Ok(())
+        replace_file(target, &image.bytes, image)
+            .await
+            .map_err(|error| format!("cannot write `{shown}`: {error}"))
     }
 
     /// Creates the missing directories above `target`, after
@@ -250,6 +243,39 @@ impl Root {
         self.existing_file(path).await
     }
 
+    /// Resolves a regular file or a missing suffix within the allowed root.
+    pub(crate) async fn undo_path(&self, shown: &str) -> Result<PathBuf, ToolError> {
+        validate(shown)?;
+        let target = self.path.join(shown);
+        let mut ancestor = target.as_path();
+        loop {
+            match tokio::fs::symlink_metadata(ancestor).await {
+                Ok(metadata) => {
+                    if ancestor == target && !metadata.is_file() {
+                        return Err(invalid(format!("expected a regular file at `{shown}`")));
+                    }
+                    let resolved = tokio::fs::canonicalize(ancestor)
+                        .await
+                        .map_err(|err| invalid(err.to_string()))?;
+                    self.inside(&resolved, shown)?;
+                    if ancestor == target {
+                        return Ok(resolved);
+                    }
+                    let suffix = target
+                        .strip_prefix(ancestor)
+                        .map_err(|err| invalid(err.to_string()))?;
+                    return Ok(resolved.join(suffix));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    ancestor = ancestor
+                        .parent()
+                        .ok_or_else(|| invalid(format!("missing root for `{shown}`")))?;
+                }
+                Err(err) => return Err(invalid(err.to_string())),
+            }
+        }
+    }
+
     /// Deletes one regular file.
     pub async fn delete(&self, call: &Call<'_>, path: &str) -> Result<(), ToolError> {
         let resolved = self.plain_file(path).await?;
@@ -259,19 +285,20 @@ impl Root {
             return Err(invalid(format!("`{path}` changed while it was locked")));
         }
         // A file too large to keep is deleted without an undo.
-        let kept = read_state(&resolved, self.max_file_bytes).await;
+        let kept = FileImage::read(&resolved, self.max_file_bytes).await;
         tokio::fs::remove_file(&resolved)
             .await
             .map_err(|error| ToolError::NotStarted(format!("cannot delete `{path}`: {error}")))?;
         if let Ok(Some(content)) = kept {
-            self.history.record(
+            self.record(
                 call,
                 vec![FileState {
                     path: path.to_owned(),
                     before: Some(content),
                     after: None,
                 }],
-            );
+            )
+            .await;
         }
         Ok(())
     }
@@ -293,12 +320,12 @@ impl Root {
             return Err(invalid(format!("`{to}` already exists")));
         }
         self.make_parents(&target, to).await?;
-        let kept = read_state(&source, self.max_file_bytes).await;
+        let kept = FileImage::read(&source, self.max_file_bytes).await;
         tokio::fs::rename(&source, &target).await.map_err(|error| {
             ToolError::NotStarted(format!("cannot move `{from}` to `{to}`: {error}"))
         })?;
         if let Ok(Some(content)) = kept {
-            self.history.record(
+            self.record(
                 call,
                 vec![
                     FileState {
@@ -309,10 +336,11 @@ impl Root {
                     FileState {
                         path: to.to_owned(),
                         before: None,
-                        after: Some(content),
+                        after: Some(content.bytes),
                     },
                 ],
-            );
+            )
+            .await;
         }
         Ok(())
     }
@@ -324,7 +352,17 @@ impl Root {
         let mut resolved_paths: Vec<(String, PathBuf)> = Vec::new();
         for edit in &edits {
             if !resolved_paths.iter().any(|(path, _)| *path == edit.path) {
-                resolved_paths.push((edit.path.clone(), self.existing_file(&edit.path).await?));
+                let resolved = self.existing_file(&edit.path).await;
+                // On Windows an open handle can name a displaced file during
+                // rename. Repeat the entire checked lookup between writers.
+                #[cfg(windows)]
+                let resolved = if resolved.is_err() {
+                    let _stable = self.locks.all().await;
+                    self.existing_file(&edit.path).await
+                } else {
+                    resolved
+                };
+                resolved_paths.push((edit.path.clone(), resolved?));
             }
         }
         let locked: Vec<PathBuf> = resolved_paths
@@ -335,23 +373,27 @@ impl Root {
         // path -> (resolved, new content), in first-seen order, and the
         // content before, for undo.
         let mut files: Vec<(String, PathBuf, String)> = Vec::new();
-        let mut originals: Vec<String> = Vec::new();
+        let mut originals: Vec<FileImage> = Vec::new();
         for edit in edits {
-            let index = match files.iter().position(|(path, ..)| *path == edit.path) {
+            let resolved = resolved_paths
+                .iter()
+                .find(|(path, _)| *path == edit.path)
+                .map(|(_, path)| path)
+                .ok_or_else(|| invalid("missing resolved edit path"))?;
+            let index = match files.iter().position(|(_, path, _)| path == resolved) {
                 Some(index) => index,
                 None => {
-                    let resolved = resolved_paths
-                        .iter()
-                        .find(|(path, _)| *path == edit.path)
-                        .map(|(_, resolved)| resolved.clone())
-                        .ok_or_else(|| invalid("an edit names a file that was not resolved"))?;
-                    let bytes = tokio::fs::read(&resolved)
+                    let bytes = tokio::fs::read(resolved)
                         .await
                         .map_err(|error| invalid(format!("`{}`: {error}", edit.path)))?;
                     let text = String::from_utf8(bytes)
                         .map_err(|_| invalid(format!("`{}` is not UTF-8 text", edit.path)))?;
-                    originals.push(text.clone());
-                    files.push((edit.path.clone(), resolved, text));
+                    originals.push(
+                        FileImage::capture(resolved, text.as_bytes().to_vec())
+                            .await
+                            .map_err(|e| invalid(e.to_string()))?,
+                    );
+                    files.push((edit.path.clone(), resolved.clone(), text));
                     files.len() - 1
                 }
             };
@@ -366,14 +408,7 @@ impl Root {
             }
         }
         for (written, (path, resolved, text)) in files.iter().enumerate() {
-            let temporary = temporary_beside(resolved);
-            let result = async {
-                tokio::fs::write(&temporary, text.as_bytes()).await?;
-                tokio::fs::rename(&temporary, resolved).await
-            }
-            .await;
-            if let Err(error) = result {
-                let _ = tokio::fs::remove_file(&temporary).await;
+            if let Err(error) = replace_file(resolved, text.as_bytes(), &originals[written]).await {
                 let error = format!("cannot write `{path}`: {error}");
                 return Err(if written == 0 {
                     ToolError::NotStarted(error)
@@ -385,20 +420,21 @@ impl Root {
         // A file too large to keep leaves the call without an undo.
         if originals
             .iter()
-            .all(|text| text.len() <= self.max_file_bytes)
+            .all(|image| image.bytes.len() <= self.max_file_bytes)
         {
-            self.history.record(
+            self.record(
                 call,
                 files
                     .iter()
                     .zip(originals)
                     .map(|((path, _, text), original)| FileState {
                         path: path.clone(),
-                        before: Some(original.into_bytes()),
+                        before: Some(original),
                         after: Some(text.as_bytes().to_vec()),
                     })
                     .collect(),
-            );
+            )
+            .await;
         }
         Ok(files.into_iter().map(|(path, ..)| path).collect())
     }
@@ -412,6 +448,27 @@ impl Root {
             .map_err(|error| ToolError::NotStarted(format!("cannot stage the patch: {error}")))?;
         Ok(Scratch(path))
     }
+}
+
+async fn replace_file(target: &Path, bytes: &[u8], _original: &FileImage) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let temporary = temporary_beside(target);
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&temporary).await?;
+    let scratch = Scratch(temporary);
+    file.write_all(bytes).await?;
+    file.flush().await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(_original.mode))
+            .await?;
+    }
+    drop(file);
+    tokio::fs::rename(scratch.path(), target).await
 }
 
 /// A new temporary file name in the directory of `file`.

@@ -71,6 +71,47 @@ async fn repo_tools_report_a_workspace_that_is_not_a_repository() {
 }
 
 #[tokio::test]
+async fn undo_recognizes_a_mounted_formatters_write() {
+    use serde_json::json;
+
+    let dir = TempDir::new("repo-format-undo");
+    let workspace = dir.workspace();
+    git(&workspace, &["init", "--quiet"]);
+    git(&workspace, &["config", "core.autocrlf", "false"]);
+    std::fs::write(
+        workspace.join("format.diff"),
+        "--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-raw\n+formatted\n",
+    )
+    .unwrap();
+    let mut distribution = headless(&dir);
+    distribution.enable("format").unwrap();
+    distribution.set_config("format-on-write", "root", json!(workspace));
+    distribution.set_config("format-on-write", "formatters", json!({
+        "test": {"command":["git","apply","--include=$FILE","format.diff"],"extensions":[".txt"]}
+    }));
+    distribution.set_config("policy-authority", "approve", json!(["repo.create-file"]));
+    let kernel = kernel(&distribution).await;
+    let handle = kernel.handle();
+    let session = new_session(&handle).await;
+    let answer = reply(
+        &turn(
+            &handle,
+            &session,
+            r#"/call repo.create-file {"path":"note.txt","content":"raw\n"}"#,
+        )
+        .await,
+    );
+    assert!(answer.contains("Formatted by"), "{answer}");
+    let file = workspace.join("note.txt");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "formatted\n");
+    rah_api::undo::undo_newest(&handle, &session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!file.exists());
+}
+
+#[tokio::test]
 async fn repo_write_tools_need_approval_in_the_presets() {
     let dir = TempDir::new("repo-write-ask");
     let kernel = kernel(&headless(&dir)).await;

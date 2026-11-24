@@ -94,16 +94,6 @@ pub(crate) async fn save(
             save.kind
         )));
     }
-    let _loop_change = if slot == "loop" {
-        Some(shared.loop_usage.try_write().map_err(|_| {
-            ApiError(
-                StatusCode::CONFLICT,
-                "The loop is in use. Save again after the current work finishes.".into(),
-            )
-        })?)
-    } else {
-        None
-    };
     let admin = admin(&shared)?;
     let current = save
         .id
@@ -332,7 +322,10 @@ async fn apply(
     let status = admin
         .configure(&id, saved.config.clone())
         .await
-        .map_err(|error| AdminError::Failed(format!("{error}; the previous settings were kept")))?;
+        .map_err(|error| match error {
+            AdminError::LoopBusy(_) => error,
+            other => AdminError::Failed(format!("{other}; the previous settings were kept")),
+        })?;
     if status == PluginStatus::Active {
         return Ok((id, status));
     }

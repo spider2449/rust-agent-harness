@@ -880,6 +880,66 @@ async fn a_file_changed_since_refuses_the_undo_and_drops_only_that_change() {
 }
 
 #[tokio::test]
+async fn undo_checks_all_resolved_targets_before_restoring_a_move() {
+    use rah_api::undo::{FileUndo, UndoError};
+
+    let repo = Repo::new("undo-redirected-move");
+    let (tools, undo) = repo.with_undo().await;
+    let session = SessionId::new();
+    tools["repo.move-file"]
+        .call(
+            json!({"from":"src/lib.rs","to":"out/lib.rs"}),
+            in_session(&session),
+        )
+        .await
+        .unwrap();
+    std::fs::rename(repo.0.join("out"), repo.0.join("original")).unwrap();
+    std::fs::create_dir(repo.0.join("other")).unwrap();
+    std::fs::copy(repo.0.join("original/lib.rs"), repo.0.join("other/lib.rs")).unwrap();
+    link_dir(&repo, "other", "out");
+    assert!(matches!(
+        undo.undo_last(&session).await,
+        Err(UndoError::Changed { .. })
+    ));
+    assert!(!repo.0.join("src/lib.rs").exists());
+    assert!(repo.0.join("other/lib.rs").is_file());
+
+    link_dir(&repo, ".git", "protected");
+    assert!(undo.0.undo_path("protected/config").await.is_err());
+    assert!(undo.0.undo_path("protected/missing/file").await.is_err());
+}
+
+#[tokio::test]
+async fn late_refresh_cannot_adopt_another_sessions_edit() {
+    use rah_api::undo::FileUndo;
+
+    let repo = Repo::new("undo-interleaved");
+    let (tools, undo) = repo.with_undo().await;
+    let first = SessionId::new();
+    let cx = in_session(&first);
+    let call = cx.call.clone();
+    tools["repo.create-file"]
+        .call(json!({"path":"shared.txt","content":"first"}), cx)
+        .await
+        .unwrap();
+    tools["repo.edit-files"]
+        .call(
+            json!({"edits":[{"path":"shared.txt","old":"first","new":"second"}]}),
+            in_session(&SessionId::new()),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        undo.begin_format(&call, "shared.txt", &repo.0.join("shared.txt"))
+            .await,
+        rah_api::undo::FormatClaim::Changed
+    ));
+    undo.refresh(&call).await;
+    assert!(undo.undo_last(&first).await.is_err());
+    assert_eq!(repo.read("shared.txt"), "second");
+}
+
+#[tokio::test]
 async fn the_history_follows_a_formatter_that_rewrote_the_file() {
     use rah_api::undo::{FileUndo, UndoError};
 
@@ -902,7 +962,16 @@ async fn the_history_follows_a_formatter_that_rewrote_the_file() {
     };
     // A formatter rewrites the file after the tool, before the call ends.
     let call = edit("alpha", "gamma").await;
-    std::fs::write(repo.0.join("src/lib.rs"), "fn gamma() {}\n\nfn beta() {}\n").unwrap();
+    let path = repo.0.join("src/lib.rs");
+    let rah_api::undo::FormatClaim::Tracked(record) =
+        undo.begin_format(&call, "src/lib.rs", &path).await
+    else {
+        panic!("the formatter must own the change");
+    };
+    let before = std::fs::read(&path).unwrap();
+    let formatted = b"fn gamma() {}\n\nfn beta() {}\n";
+    std::fs::write(&path, formatted).unwrap();
+    record(&before, formatted.to_vec());
     undo.refresh(&call).await;
     undo.undo_last(&session).await.unwrap();
     assert_eq!(repo.read("src/lib.rs"), "fn alpha() {}\nfn beta() {}\n");
@@ -969,4 +1038,120 @@ fn patch_paths_lists_old_and_new_names_of_renames() {
         ["src/a.rs", "old.txt", "new.txt", "bin.png"]
     );
     assert!(patch_paths("").is_empty());
+}
+
+#[tokio::test]
+async fn edit_groups_case_variants_by_the_resolved_file() {
+    use rah_api::undo::FileUndo;
+    let repo = Repo::new("edit-case");
+    let (tools, undo) = repo.with_undo().await;
+    let sid = SessionId::new();
+    std::fs::write(repo.0.join("case.txt"), "one two").unwrap();
+    let aliases = repo.0.join("CASE.txt").exists();
+    if !aliases {
+        std::fs::write(repo.0.join("CASE.txt"), "two").unwrap();
+    }
+    tools["repo.edit-files"]
+        .call(
+            json!({"edits":[
+                {"path":"case.txt","old":"one","new":"1"},
+                {"path":"CASE.txt","old":"two","new":"2"}
+            ]}),
+            in_session(&sid),
+        )
+        .await
+        .unwrap();
+    if aliases {
+        assert_eq!(repo.read("case.txt"), "1 2");
+        assert_eq!(undo.changes(&sid)[0].files.len(), 1);
+    } else {
+        assert_eq!(repo.read("case.txt"), "1 two");
+        assert_eq!(repo.read("CASE.txt"), "2");
+    }
+    undo.undo_last(&sid).await.unwrap();
+    assert_eq!(repo.read("case.txt"), "one two");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn edits_and_undo_preserve_unix_access_bits() {
+    use rah_api::undo::FileUndo;
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new("edit-mode");
+    let (tools, undo) = repo.with_undo().await;
+    let sid = SessionId::new();
+    let path = repo.0.join("script");
+    let mode = || std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    for expected in [0o755, 0o600] {
+        std::fs::write(&path, "original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(expected)).unwrap();
+        tools["repo.edit-files"]
+            .call(
+                json!({"edits":[{"path":"script","old":"original","new":"changed"}]}),
+                in_session(&sid),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mode(), expected);
+        undo.undo_last(&sid).await.unwrap();
+        assert_eq!(mode(), expected);
+        tools["repo.delete-file"]
+            .call(json!({"path":"script"}), in_session(&sid))
+            .await
+            .unwrap();
+        undo.undo_last(&sid).await.unwrap();
+        assert_eq!(mode(), expected);
+        assert_eq!(repo.read("script"), "original");
+    }
+}
+
+#[tokio::test]
+async fn acknowledging_a_reserved_batch_keeps_notes_from_later_undos() {
+    use rah_api::undo::FileUndo;
+    let repo = Repo::new("notes-batch");
+    let (tools, undo) = repo.with_undo().await;
+    let session = SessionId::new();
+    let turn = rah_protocol::RequestId::new();
+    let change = async |path: &str| {
+        tools["repo.create-file"]
+            .call(json!({"path":path,"content":"a"}), in_session(&session))
+            .await
+            .unwrap();
+        undo.undo_last(&session).await.unwrap();
+    };
+    change("first.txt").await;
+    assert!(undo.reserve_notes(&session, &turn, &[])[0].contains("first.txt"));
+    change("second.txt").await;
+    undo.acknowledge_notes(&session, &turn);
+    let notes = undo.reserve_notes(&session, &rah_protocol::RequestId::new(), &[]);
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].contains("second.txt"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn undo_respects_a_later_permission_change() {
+    use rah_api::undo::{FileUndo, UndoError};
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new("undo-chmod");
+    let path = repo.0.join("crlf.txt");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (tools, undo) = repo.with_undo().await;
+    let sid = SessionId::new();
+    tools["repo.edit-files"]
+        .call(
+            json!({"edits":[{"path":"crlf.txt","old":"one","new":"changed"}]}),
+            in_session(&sid),
+        )
+        .await
+        .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(matches!(
+        undo.undo_last(&sid).await,
+        Err(UndoError::Changed { .. })
+    ));
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }

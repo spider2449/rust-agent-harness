@@ -42,6 +42,7 @@ use rah_api::{
     hooks::{ToolAfterInvoke, ToolCompletion},
     host::NoticeOnce,
     sandbox::{ExecEnv, ExecError, ProgramSpec, SANDBOX},
+    undo::{FILE_UNDO, FormatClaim},
 };
 use rah_protocol::{PermissionLevel, ToolContent, ToolEffect};
 use serde::Deserialize;
@@ -66,7 +67,9 @@ pub struct FormatOnWritePlugin {
 impl FormatOnWritePlugin {
     pub fn new(id: impl Into<PluginId>) -> Self {
         Self {
-            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION")).requires(["sandbox"]),
+            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
+                .requires(["sandbox"])
+                .optional([rah_api::undo::FILE_UNDO_SERVICE]),
         }
     }
 
@@ -296,6 +299,7 @@ impl Plugin for FormatOnWritePlugin {
             PluginError::from(format!("root `{}`: {error}", requested.display()))
         })?;
         let runner = Arc::new(Runner {
+            kernel: scope.kernel(),
             formatters,
             sandbox,
             root,
@@ -312,6 +316,7 @@ impl Plugin for FormatOnWritePlugin {
 }
 
 struct Runner {
+    kernel: rah_api::KernelHandle,
     formatters: Vec<Formatter>,
     sandbox: Arc<dyn ExecEnv>,
     root: PathBuf,
@@ -339,7 +344,7 @@ impl Runner {
         }
         let mut changed: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
-        for relative in changed_paths(&completion.request.call.input.0)
+        'files: for relative in changed_paths(&completion.request.call.input.0)
             .into_iter()
             .take(self.settings.max_files)
         {
@@ -349,7 +354,21 @@ impl Runner {
             let Some(formatter) = self.formatter_for(&relative, &file).await else {
                 continue;
             };
-            match self.run(formatter, &relative, &file).await {
+            let mut receipt = None;
+            for (_, undo) in self.kernel.get_all(FILE_UNDO) {
+                match undo
+                    .begin_format(&completion.request.call.id, &relative, &file)
+                    .await
+                {
+                    FormatClaim::Untracked => {}
+                    FormatClaim::Changed => continue 'files,
+                    FormatClaim::Tracked(record) => {
+                        receipt = Some(record);
+                        break;
+                    }
+                }
+            }
+            match self.run(formatter, &relative, &file, receipt).await {
                 Outcome::Unchanged => {}
                 Outcome::Changed => changed.push(format!("{relative} ({})", formatter.name)),
                 Outcome::Failed(reason) if formatter.explicit => {
@@ -471,7 +490,13 @@ impl Runner {
         false
     }
 
-    async fn run(&self, formatter: &Formatter, relative: &str, file: &Path) -> Outcome {
+    async fn run(
+        &self,
+        formatter: &Formatter,
+        relative: &str,
+        file: &Path,
+        receipt: Option<rah_api::undo::FormatReceipt>,
+    ) -> Outcome {
         let Ok(before) = tokio::fs::read(file).await else {
             return Outcome::Unchanged;
         };
@@ -509,7 +534,12 @@ impl Runner {
             ));
         }
         match tokio::fs::read(file).await {
-            Ok(after) if after != before => Outcome::Changed,
+            Ok(after) if after != before => {
+                if let Some(record) = receipt {
+                    record(&before, after);
+                }
+                Outcome::Changed
+            }
             _ => Outcome::Unchanged,
         }
     }

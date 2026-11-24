@@ -567,7 +567,6 @@ mod tests {
             spawner,
             notices: NoticeOnce::new(kernel.handle(), id.clone()),
             workspace_switch: tokio::sync::Mutex::new(()),
-            loop_usage: Arc::default(),
             folders: Mutex::new(None),
         });
         let update = |name: &str| {

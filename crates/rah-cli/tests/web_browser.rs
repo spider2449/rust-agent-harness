@@ -2466,6 +2466,34 @@ async fn a_file_change_is_undone_from_the_session_header() {
     .await;
     assert!(file.exists());
     page.screenshot("undo-button").await;
+    // Keep the changes response pending while the user opens another session.
+    let posts = page
+        .eval(
+            r#"(async () => {
+                const original = state.current;
+                const realApi = api;
+                const posts = [];
+                let release;
+                const pending = new Promise(resolve => { release = resolve; });
+                api = (path, options) => {
+                    if (path === '/sessions/' + original + '/changes') return pending;
+                    if (path.endsWith('/undo') && options?.method === 'POST') posts.push(path);
+                    return realApi(path, options);
+                };
+                try {
+                    const undo = undoLast();
+                    await newSession();
+                    release({changes: [{}]});
+                    await undo;
+                } finally {
+                    api = realApi;
+                    await openSession(original);
+                }
+                return posts;
+            })()"#,
+        )
+        .await;
+    assert_eq!(posts, json!([]), "switching sessions must abandon undo");
     page.eval("byId('session-undo').click(); true").await;
     page.wait(
         "the undo",

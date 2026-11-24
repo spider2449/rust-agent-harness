@@ -8,7 +8,7 @@ use std::{
 use futures::stream::BoxStream;
 use rah_kernel::{KernelHandle, ServiceKey};
 use rah_protocol::{AgentEvent, SessionId, SessionRecord};
-use tokio::sync::{OwnedRwLockReadGuard, RwLock};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio_util::sync::CancellationToken;
 
 pub const LOOP: ServiceKey<dyn AgentLoop> = ServiceKey::new("loop");
@@ -77,8 +77,15 @@ pub async fn open_turn_history(
 /// `Completed`, `Failed` or `Cancelled`.
 pub type TurnStream = BoxStream<'static, AgentEvent>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnOrigin {
+    User,
+    Background,
+}
+
 #[derive(Clone, Debug)]
 pub struct TurnRequest {
+    pub origin: TurnOrigin,
     pub session: SessionId,
     pub input: String,
     pub cancel: CancellationToken,
@@ -97,20 +104,47 @@ pub trait AgentLoop: Send + Sync {
 pub const TURN_RUNNING: &str =
     "a turn is already running in this session; wait for it or cancel it";
 
+/// Distribution-wide admission state shared by the standard loop instances.
+pub const RUNNING_TURNS: ServiceKey<RunningTurns> = ServiceKey::new("running-turns");
+
 /// The sessions a loop is running a turn in. Two turns in one session
 /// would interleave their records in its log: the context rebuilt from it
 /// then pairs tool calls with the wrong results, for every later turn.
 #[derive(Clone, Default)]
-pub struct RunningTurns(Arc<Mutex<HashSet<SessionId>>>);
+pub struct RunningTurns {
+    sessions: Arc<Mutex<HashSet<SessionId>>>,
+    usage: Arc<RwLock<()>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("The loop is in use. Save again after the current work finishes.")]
+pub struct LoopBusy;
 
 impl RunningTurns {
     /// Marks `session` as running a turn until the returned guard is
     /// dropped. `None` when it already runs one.
     pub fn begin(&self, session: &SessionId) -> Option<RunningTurn> {
-        let mut running = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        running.insert(session.clone()).then(|| RunningTurn {
+        self.admit(session).ok()
+    }
+
+    pub fn try_change(&self) -> Result<OwnedRwLockWriteGuard<()>, LoopBusy> {
+        self.usage.clone().try_write_owned().map_err(|_| LoopBusy)
+    }
+
+    pub fn admit(&self, session: &SessionId) -> Result<RunningTurn, &'static str> {
+        let lease = self
+            .usage
+            .clone()
+            .try_read_owned()
+            .map_err(|_| "the loop is changing; retry the turn")?;
+        let mut running = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
+        if !running.insert(session.clone()) {
+            return Err(TURN_RUNNING);
+        }
+        Ok(RunningTurn {
             turns: self.clone(),
             session: session.clone(),
+            _lease: lease,
         })
     }
 }
@@ -118,6 +152,7 @@ impl RunningTurns {
 /// Held by a running turn; dropping it frees the session, however the turn
 /// ends (completion, failure, cancellation or a disposed scope).
 pub struct RunningTurn {
+    _lease: OwnedRwLockReadGuard<()>,
     turns: RunningTurns,
     session: SessionId,
 }
@@ -125,7 +160,7 @@ pub struct RunningTurn {
 impl Drop for RunningTurn {
     fn drop(&mut self) {
         self.turns
-            .0
+            .sessions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.session);
@@ -152,9 +187,13 @@ mod tests {
         let (one, other) = (SessionId::new(), SessionId::new());
         let first = turns.begin(&one);
         assert!(first.is_some());
+        assert!(turns.try_change().is_err());
         assert!(turns.begin(&one).is_none());
         assert!(turns.clone().begin(&other).is_some());
         drop(first);
+        let change = turns.try_change().unwrap();
+        assert!(turns.admit(&one).is_err());
+        drop(change);
         assert!(turns.begin(&one).is_some());
     }
 }

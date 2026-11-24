@@ -37,12 +37,21 @@ Where the record can be kept:
    files, and is not recorded.
 2. **The record follows the file to the end of the call.** A
    `tool.after_invoke` handler of the same plugin runs after every other
-   (priority -100) and reads the files again, so a formatter that rewrote
-   the file (`format-on-write`) is part of the change. To find the record of
-   a call, `ToolContext` gains `call: ToolCallId`, the id the
-   `ToolInvoker` already allocates.
+   (priority -100) and verifies the recorded bytes. A formatter uses
+   `FileUndo::begin_format` to claim the original call and canonical file
+   before running. The owning provider holds its file lock through formatting
+   and accepts the formatter's observed byte transition only for that call.
+   An intervening recorded write disqualifies an unfinished call from claiming
+   the newer contents. These locks coordinate writes through the owning
+   plugin instance. Editors and independent processes can still change files
+   while a formatter runs. The provider identifies the call by the
+   `ToolCallId` supplied in `ToolContext`.
 3. **Undo takes back the newest change of a session, all or nothing.** Every
-   file must still match what the change left (content, or still missing).
+   file must still resolve to its recorded target within the permitted root
+   and match what the change left (content, or still missing). On Unix the
+   record also checks ordinary owner, group and other access bits. Edits
+   and restorations preserve those bits, including when undo recreates a
+   deleted file. Temporary files start with owner-only access.
    Then each file gets its earlier content back, or is deleted when the
    change created it. If any file differs, nothing is written and the change
    is dropped from the history with the names of the files that differ.
@@ -54,11 +63,12 @@ Where the record can be kept:
    button). It is not a tool, so the model cannot call it. Undo is the
    user's own action on their workspace, like an editor's, so it does not go
    through `tool.before_invoke`.
-5. **The model is told at its next turn.** An undo leaves a note with the
-   provider. A frontend that starts a turn takes the session's notes
-   (`rah_api::undo::with_notes`) and puts them before the user's text, so
-   the note is in the session log like any input and replay shows the same
-   context.
+5. **The next accepted user turn carries pending undo notes.** Both standard
+   loops reserve notes after session admission and workspace validation.
+   They acknowledge the reserved batch after appending `TurnStarted`. If the
+   append outcome is unknown, the next user turn checks the previous turn ID
+   in the session history before including the notes again. Notes added during
+   the append stay pending. Scheduler and delegated turns leave notes queued.
 6. **The history is bounded and forgotten.** At most 50 changes per session
    and 64 MiB in total per plugin instance, oldest first. It lives as long as
    the plugin instance. A restart, a configuration change or switching the

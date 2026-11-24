@@ -14,7 +14,6 @@ use futures::StreamExt;
 use rah_api::{
     CancellationToken,
     agent_loop::{LOOP, TurnRequest, TurnStream},
-    undo,
 };
 use rah_protocol::{AgentEvent, SessionId};
 use serde::Deserialize;
@@ -51,7 +50,6 @@ enum ClientMessage {
 }
 
 struct Running {
-    _loop_usage: tokio::sync::OwnedRwLockReadGuard<()>,
     session: SessionId,
     events: TurnStream,
     cancel: CancellationToken,
@@ -147,19 +145,17 @@ async fn handle(
             let Ok(session) = SessionId::from_str(&session) else {
                 return Some(error(format!("`{session}` is not a session id")));
             };
-            let loop_usage = shared.loop_usage.clone().read_owned().await;
             let Some(agent_loop) = shared.kernel.get(LOOP) else {
                 return Some(error("no agent loop is mounted"));
             };
             let cancel = shared.stop.child_token();
             let events = agent_loop.run_turn(TurnRequest {
+                origin: rah_api::agent_loop::TurnOrigin::User,
                 session: session.clone(),
-                // Tells the model about files the user undid (ADR 0060).
-                input: undo::with_notes(&shared.kernel, &session, input),
+                input,
                 cancel: cancel.clone(),
             });
             *running = Some(Running {
-                _loop_usage: loop_usage,
                 session,
                 events,
                 cancel,

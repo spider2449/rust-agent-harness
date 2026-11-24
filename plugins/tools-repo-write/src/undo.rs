@@ -5,18 +5,19 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use rah_api::{
     async_trait,
-    undo::{FileChange, FileUndo, UndoError, UndoReport},
+    undo::{FileChange, FileUndo, FormatClaim, UndoError, UndoReport},
 };
-use rah_protocol::{SessionId, ToolCallId};
+use rah_protocol::{RequestId, SessionEntry, SessionId, SessionRecord, ToolCallId};
 
 use crate::fsops::Root;
+use crate::locks::Locks;
 
 /// Changes kept per session; older ones are forgotten.
 const MAX_CHANGES_PER_SESSION: usize = 50;
@@ -35,13 +36,69 @@ pub(crate) struct Call<'a> {
 /// One file of a change. `None` means there was no file.
 pub(crate) struct FileState {
     pub path: String,
-    pub before: Option<Vec<u8>>,
+    pub before: Option<FileImage>,
     pub after: Option<Vec<u8>>,
+}
+
+/// Bytes and ordinary Unix access bits saved before replacing a file.
+#[derive(Clone)]
+pub(crate) struct FileImage {
+    pub bytes: Vec<u8>,
+    #[cfg(unix)]
+    pub mode: u32,
+}
+
+impl FileImage {
+    pub async fn capture(_path: &Path, bytes: Vec<u8>) -> std::io::Result<Self> {
+        Ok(Self {
+            bytes,
+            #[cfg(unix)]
+            mode: {
+                use std::os::unix::fs::PermissionsExt;
+                tokio::fs::metadata(_path).await?.permissions().mode() & 0o777
+            },
+        })
+    }
+
+    pub async fn read(path: &Path, limit: usize) -> Result<Option<Self>, ()> {
+        match read_state(path, limit).await? {
+            Some(bytes) => Self::capture(path, bytes).await.map(Some).map_err(drop),
+            None => Ok(None),
+        }
+    }
 }
 
 impl FileState {
     fn bytes(&self) -> usize {
-        self.before.as_ref().map_or(0, Vec::len) + self.after.as_ref().map_or(0, Vec::len)
+        self.before.as_ref().map_or(0, |image| image.bytes.len())
+            + self.after.as_ref().map_or(0, Vec::len)
+    }
+}
+
+#[derive(Clone)]
+struct RecordedTarget {
+    key: PathBuf,
+    #[cfg(unix)]
+    mode: Option<u32>,
+}
+
+#[cfg(unix)]
+async fn access_mode(path: &Path) -> std::io::Result<Option<u32>> {
+    use std::os::unix::fs::PermissionsExt;
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) => Ok(Some(metadata.permissions().mode() & 0o777)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+impl RecordedTarget {
+    async fn matches(&self, path: &Path) -> bool {
+        #[cfg(unix)]
+        if access_mode(path).await.ok() != Some(self.mode) {
+            return false;
+        }
+        self.key == Locks::key(path)
     }
 }
 
@@ -51,6 +108,9 @@ struct Entry {
     tool: &'static str,
     at_ms: u64,
     files: Vec<FileState>,
+    /// Resolved file identities in the same order as the snapshots.
+    targets: Vec<RecordedTarget>,
+    superseded: bool,
 }
 
 impl Entry {
@@ -73,6 +133,7 @@ struct State {
     entries: Vec<Entry>,
     bytes: usize,
     notes: HashMap<SessionId, Vec<String>>,
+    reserved: HashMap<SessionId, (RequestId, Vec<String>)>,
 }
 
 impl State {
@@ -105,6 +166,26 @@ fn now_ms() -> u64 {
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
+impl Root {
+    pub(crate) async fn record(&self, call: &Call<'_>, files: Vec<FileState>) {
+        let mut targets = Vec::with_capacity(files.len());
+        for file in &files {
+            let Ok(path) = self.undo_path(&file.path).await else {
+                return;
+            };
+            targets.push(RecordedTarget {
+                key: Locks::key(&path),
+                #[cfg(unix)]
+                mode: match access_mode(&path).await {
+                    Ok(mode) => mode,
+                    Err(_) => return,
+                },
+            });
+        }
+        self.history.record(call, files, targets);
+    }
+}
+
 impl History {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -112,7 +193,7 @@ impl History {
 
     /// Keeps a completed call's files, newest last. Called while the call's
     /// file locks are held.
-    pub fn record(&self, call: &Call<'_>, files: Vec<FileState>) {
+    fn record(&self, call: &Call<'_>, files: Vec<FileState>, targets: Vec<RecordedTarget>) {
         if files.is_empty() {
             return;
         }
@@ -122,8 +203,20 @@ impl History {
             tool: call.tool,
             at_ms: now_ms(),
             files,
+            targets,
+            superseded: false,
         };
         let mut state = self.lock();
+        for prior in &mut state.entries {
+            if !prior.superseded
+                && prior
+                    .targets
+                    .iter()
+                    .any(|path| entry.targets.iter().any(|next| next.key == path.key))
+            {
+                prior.superseded = true;
+            }
+        }
         state.bytes += entry.bytes();
         state.entries.push(entry);
         let session = call.session;
@@ -145,37 +238,42 @@ impl History {
         }
     }
 
-    /// Reads the files of `call`'s change again at the end of the call, so a
-    /// formatter that rewrote one is part of the change. A file that can no
-    /// longer be kept drops the change.
+    /// Discards a change whose final bytes cannot be attributed to its call.
     pub async fn refresh(&self, root: &Root, call: &ToolCallId) {
-        let paths: Vec<String> = {
+        let (paths, targets): (Vec<String>, _) = {
             let state = self.lock();
             let Some(entry) = state.entries.iter().find(|entry| entry.call == *call) else {
                 return;
             };
-            entry.files.iter().map(|file| file.path.clone()).collect()
+            (
+                entry.files.iter().map(|file| file.path.clone()).collect(),
+                entry.targets.clone(),
+            )
         };
-        let resolved: Vec<_> = paths.iter().map(|path| root.path.join(path)).collect();
-        let _writing = root.locks.files(&resolved).await;
+        let keys: Vec<_> = targets.iter().map(|target| target.key.clone()).collect();
+        let _writing = root.locks.files(&keys).await;
         let mut now = Vec::with_capacity(paths.len());
-        for file in &resolved {
-            now.push(read_state(file, root.max_file_bytes).await);
+        for (path, target) in paths.into_iter().zip(targets) {
+            now.push(match root.undo_path(&path).await {
+                Ok(file) if target.matches(&file).await => {
+                    read_state(&file, root.max_file_bytes).await
+                }
+                _ => Err(()),
+            });
         }
         let mut state = self.lock();
         let Some(index) = state.entries.iter().position(|entry| entry.call == *call) else {
             return;
         };
-        if now.iter().any(Result::is_err) {
+        if state.entries[index].superseded
+            || state.entries[index]
+                .files
+                .iter()
+                .zip(now)
+                .any(|(file, bytes)| bytes.as_ref().ok() != Some(&file.after))
+        {
             state.remove(index);
-            return;
         }
-        let before = state.entries[index].bytes();
-        for (file, current) in state.entries[index].files.iter_mut().zip(now) {
-            file.after = current.unwrap_or_default();
-        }
-        let after = state.entries[index].bytes();
-        state.bytes = state.bytes - before + after;
     }
 
     /// Undoes the newest change of `session` in `root`.
@@ -186,6 +284,7 @@ impl History {
     ) -> Result<UndoReport, UndoError> {
         // Taken out first: a failed or refused undo does not leave it at the
         // top, where it would block the older changes.
+        let _writing = root.locks.all().await;
         let entry = {
             let mut state = self.lock();
             let index = state
@@ -196,17 +295,19 @@ impl History {
             state.remove(index)
         };
         let tool = entry.tool.to_owned();
-        let resolved: Vec<_> = entry
-            .files
-            .iter()
-            .map(|file| root.path.join(&file.path))
-            .collect();
-        let _writing = root.locks.files(&resolved).await;
+        let mut resolved = Vec::with_capacity(entry.files.len());
         let mut changed = Vec::new();
-        for (file, path) in entry.files.iter().zip(&resolved) {
-            if read_state(path, root.max_file_bytes).await.ok().as_ref() != Some(&file.after) {
+        for (file, target) in entry.files.iter().zip(&entry.targets) {
+            let Ok(path) = root.undo_path(&file.path).await else {
+                changed.push(file.path.clone());
+                continue;
+            };
+            if !target.matches(&path).await
+                || read_state(&path, root.max_file_bytes).await.ok().as_ref() != Some(&file.after)
+            {
                 changed.push(file.path.clone());
             }
+            resolved.push(path);
         }
         if !changed.is_empty() {
             return Err(UndoError::Changed {
@@ -221,6 +322,10 @@ impl History {
         };
         let mut failure = None;
         for (file, path) in entry.files.iter().zip(&resolved) {
+            if root.undo_path(&file.path).await.as_ref().ok() != Some(path) {
+                failure = Some(format!("the target of `{}` changed", file.path));
+                break;
+            }
             let result = match &file.before {
                 Some(content) => root.write_back(path, &file.path, content).await,
                 None if file.after.is_some() => tokio::fs::remove_file(path)
@@ -266,6 +371,76 @@ pub struct RepoUndo(pub(crate) Arc<Root>);
 
 #[async_trait]
 impl FileUndo for RepoUndo {
+    async fn begin_format(
+        &self,
+        call: &ToolCallId,
+        relative: &str,
+        canonical: &Path,
+    ) -> FormatClaim {
+        let root = self.0.clone();
+        if !root.history.lock().entries.iter().any(|entry| {
+            entry.call == *call && entry.files.iter().any(|file| file.path == relative)
+        }) {
+            return FormatClaim::Untracked;
+        }
+        let guard = root
+            .locks
+            .files(&[canonical.to_owned(), root.path.join(relative)])
+            .await;
+        if root.undo_path(relative).await.ok().as_deref() != Some(canonical) {
+            return FormatClaim::Changed;
+        }
+        let Ok(Some(bytes)) = read_state(canonical, root.max_file_bytes).await else {
+            return FormatClaim::Changed;
+        };
+        let owns_bytes = root
+            .history
+            .lock()
+            .entries
+            .iter()
+            .find(|entry| entry.call == *call && !entry.superseded)
+            .is_some_and(|entry| {
+                entry
+                    .files
+                    .iter()
+                    .zip(&entry.targets)
+                    .any(|(file, target)| {
+                        file.path == relative
+                            && target.key == Locks::key(canonical)
+                            && file.after.as_deref() == Some(&bytes)
+                    })
+            });
+        if !owns_bytes {
+            return FormatClaim::Changed;
+        }
+        let call = call.clone();
+        let relative = relative.to_owned();
+        FormatClaim::Tracked(Box::new(move |before, after| {
+            let _guard = guard;
+            let mut state = root.history.lock();
+            let Some(index) = state.entries.iter().position(|entry| entry.call == call) else {
+                return;
+            };
+            let Some(file) = state.entries[index]
+                .files
+                .iter_mut()
+                .find(|file| file.path == relative)
+            else {
+                return;
+            };
+            if file.after.as_deref() != Some(before) || after.len() > root.max_file_bytes {
+                state.remove(index);
+                return;
+            }
+            let size = after.len();
+            file.after = Some(after);
+            state.bytes = state.bytes - before.len() + size;
+            while state.bytes > MAX_BYTES {
+                state.remove(0);
+            }
+        }))
+    }
+
     fn changes(&self, session: &SessionId) -> Vec<FileChange> {
         self.0
             .history
@@ -280,6 +455,47 @@ impl FileUndo for RepoUndo {
 
     async fn undo_last(&self, session: &SessionId) -> Result<UndoReport, UndoError> {
         self.0.history.undo_last(&self.0, session).await
+    }
+
+    fn reserve_notes(
+        &self,
+        session: &SessionId,
+        turn: &RequestId,
+        history: &[SessionRecord],
+    ) -> Vec<String> {
+        let mut state = self.0.history.lock();
+        let mut batch = Vec::new();
+        if let Some((previous, notes)) = state.reserved.remove(session) {
+            let recorded = history.iter().any(|record| {
+                matches!(
+                    &record.entry, SessionEntry::TurnStarted { turn, .. } if *turn == previous
+                )
+            });
+            if !recorded {
+                batch = notes;
+            }
+        }
+        batch.extend(state.notes.remove(session).unwrap_or_default());
+        if batch.len() > MAX_NOTES {
+            batch.drain(..batch.len() - MAX_NOTES);
+        }
+        if !batch.is_empty() {
+            state
+                .reserved
+                .insert(session.clone(), (turn.clone(), batch.clone()));
+        }
+        batch
+    }
+
+    fn acknowledge_notes(&self, session: &SessionId, turn: &RequestId) {
+        let mut state = self.0.history.lock();
+        if state
+            .reserved
+            .get(session)
+            .is_some_and(|(id, _)| id == turn)
+        {
+            state.reserved.remove(session);
+        }
     }
 
     fn take_notes(&self, session: &SessionId) -> Vec<String> {
@@ -303,6 +519,14 @@ impl RepoUndo {
 mod tests {
     use super::*;
 
+    fn test_targets() -> Vec<RecordedTarget> {
+        vec![RecordedTarget {
+            key: "a.txt".into(),
+            #[cfg(unix)]
+            mode: Some(0o644),
+        }]
+    }
+
     fn file(bytes: usize) -> Vec<FileState> {
         vec![FileState {
             path: "a.txt".into(),
@@ -321,7 +545,7 @@ mod tests {
             id: &id,
             tool: "repo.create-file",
         };
-        history.record(&quiet_call, file(1));
+        history.record(&quiet_call, file(1), test_targets());
         for _ in 0..MAX_CHANGES_PER_SESSION + 5 {
             let id = ToolCallId::new();
             let call = Call {
@@ -329,7 +553,7 @@ mod tests {
                 id: &id,
                 tool: "repo.edit-files",
             };
-            history.record(&call, file(1));
+            history.record(&call, file(1), test_targets());
         }
         let state = history.lock();
         let count = |session: &SessionId| {
@@ -353,6 +577,7 @@ mod tests {
                 tool: "repo.create-file",
             },
             file(MAX_BYTES),
+            test_targets(),
         );
         let state = history.lock();
         assert_eq!(state.entries.len(), 1);

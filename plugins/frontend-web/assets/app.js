@@ -613,17 +613,20 @@ async function loadChanges() {
 // Takes back the newest file change; the server refuses when a file changed
 // since. The model hears about it with the next message.
 async function undoLast() {
+  const session = state.current;
+  if (!session) return;
   if (state.running) {
     showNotice("A turn is running: wait for it or cancel it before you undo.");
     return;
   }
   try {
-    const { changes } = await api(`/sessions/${state.current}/changes`);
+    const { changes } = await api(`/sessions/${session}/changes`);
+    if (state.current !== session) return;
     if (!changes.length) {
       showNotice("There is no file change to undo in this session.");
       return;
     }
-    const done = await api(`/sessions/${state.current}/undo`, { method: "POST" });
+    const done = await api(`/sessions/${session}/undo`, { method: "POST" });
     showInfo(`${done.summary}. The model is told with your next message.`);
   } catch (error) {
     showNotice(error.message);

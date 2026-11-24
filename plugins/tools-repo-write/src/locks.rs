@@ -31,7 +31,7 @@ pub(crate) struct FilesGuard {
 impl Locks {
     /// The lock key of a path: file systems that ignore case share a lock
     /// between spellings.
-    fn key(path: &Path) -> PathBuf {
+    pub(crate) fn key(path: &Path) -> PathBuf {
         if cfg!(windows) {
             PathBuf::from(path.to_string_lossy().to_lowercase())
         } else {

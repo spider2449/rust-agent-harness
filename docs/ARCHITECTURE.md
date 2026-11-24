@@ -76,6 +76,12 @@ frontend --TurnRequest--> loop
   every AgentEvent -> EventBus -> session log (append-only), frontend, telemetry
 ```
 
+The distribution provides `running-turns` to both standard loops. Admission
+holds a shared lease for each turn and allows one active turn per session.
+Admin operations that reconfigure, restart, stop, unmount or replace a
+mounted loop take the exclusive lease through the registry update. This
+also covers CLI, scheduled and delegated turns.
+
 Both standard loops hold a `workspace-turns` read guard from opening the
 session history through completion. The distribution takes the write guard
 when switching workspace plugins. A switch during a turn is refused. A turn

@@ -144,6 +144,7 @@ pub async fn turn_with(
     let agent_loop = kernel.get(LOOP).expect("loop is mounted");
     agent_loop
         .run_turn(TurnRequest {
+            origin: rah_api::agent_loop::TurnOrigin::User,
             session: session.clone(),
             input: input.to_owned(),
             cancel,

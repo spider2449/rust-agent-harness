@@ -353,6 +353,15 @@ async fn an_interrupt_cancels_the_running_turn_and_the_repl_continues() {
         .await
         .unwrap();
     read_until(&mut output, &mut seen, "Allow? [y/N/a=always] ").await;
+    assert!(matches!(
+        kernel
+            .handle()
+            .get(ADMIN)
+            .unwrap()
+            .restart(&"loop-react".into())
+            .await,
+        Err(rah_api::admin::AdminError::LoopBusy(_))
+    ));
     assert!(running.interrupt(), "the turn is running");
     read_until(&mut output, &mut seen, "[cancelled]").await;
     assert!(seen.contains("[denied]"), "{seen}");
@@ -560,6 +569,7 @@ async fn a_session_runs_one_turn_at_a_time() {
     let agent_loop = handle.get(LOOP).unwrap();
     let start = |session: &rah_protocol::SessionId, input: &str| {
         agent_loop.run_turn(TurnRequest {
+            origin: rah_api::agent_loop::TurnOrigin::User,
             session: session.clone(),
             input: input.to_owned(),
             cancel: CancellationToken::new(),
@@ -776,4 +786,91 @@ async fn a_delegate_timeout_withdraws_the_childs_pending_approval() {
     .unwrap();
     assert!(reply(&events).contains("timed out"), "{events:?}");
     assert!(!dir.workspace().join("late.txt").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_registry_follows_abandoned_lifecycle_operations() {
+    use rah_api::admin::MountRequest;
+    async fn abandon<T: std::fmt::Debug>(
+        handle: &rah_api::KernelHandle,
+        id: &PluginId,
+        status: PluginStatus,
+        operation: impl std::future::Future<Output = T>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let pause = Mutex::new(Some((entered, wait)));
+        let target = id.clone();
+        let _watch = handle.subscribe(move |change: &PluginStatusChanged| {
+            if change.plugin == target
+                && change.status == status
+                && let Some((entered, wait)) = pause.lock().unwrap().take()
+            {
+                let _ = entered.send(());
+                let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
+            }
+        });
+        let mut operation = Box::pin(operation);
+        tokio::select! {
+            result = &mut operation => panic!("operation ended before the pause: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(10), ready) => result.unwrap().unwrap(),
+        }
+        drop(operation);
+        release.send(()).unwrap();
+        // Queue behind the abandoned operation and its bookkeeping.
+        handle
+            .get(ADMIN)
+            .unwrap()
+            .restart(&"model-mock".into())
+            .await
+            .unwrap();
+    }
+
+    let dir = TempDir::new("abandoned-admin");
+    let kernel = kernel(&headless(&dir)).await;
+    let handle = kernel.handle();
+    let admin = handle.get(ADMIN).unwrap();
+    let id = PluginId::new("test-mock");
+    let request = |id: &PluginId| MountRequest {
+        kind: "model-mock".into(),
+        id: Some(id.to_string()),
+        ..Default::default()
+    };
+    abandon(
+        &handle,
+        &id,
+        PluginStatus::Starting,
+        admin.mount(request(&id)),
+    )
+    .await;
+    assert_eq!(kernel.status(&id), Some(PluginStatus::Active));
+    assert!(admin.instance(&id).is_some());
+    let config = json!({"label":"updated"});
+    abandon(
+        &handle,
+        &id,
+        PluginStatus::Stopping,
+        admin.configure(&id, config.clone()),
+    )
+    .await;
+    assert_eq!(admin.instance(&id).unwrap().config, config);
+    abandon(&handle, &id, PluginStatus::Stopping, admin.stop(&id)).await;
+    assert!(admin.stopped().contains(&id));
+    assert_eq!(kernel.status(&id), None);
+    abandon(&handle, &id, PluginStatus::Starting, admin.start(&id)).await;
+    assert!(!admin.instance(&id).unwrap().stopped);
+    let new = PluginId::new("test-replacement");
+    abandon(
+        &handle,
+        &new,
+        PluginStatus::Starting,
+        admin.replace(&id, request(&new)),
+    )
+    .await;
+    assert!(admin.instance(&id).is_none());
+    assert_eq!(kernel.status(&id), None);
+    assert_eq!(kernel.status(&new), Some(PluginStatus::Active));
+    abandon(&handle, &new, PluginStatus::Stopping, admin.unmount(&new)).await;
+    assert!(admin.instance(&new).is_none());
+    assert_eq!(kernel.status(&new), None);
 }

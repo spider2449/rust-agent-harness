@@ -36,6 +36,10 @@ with a `tool.before_invoke` hook, the result was a missing guard.
    caller. If the runtime shuts down and drops the task, the caller gets
    `KernelError::ShutDown`.
 
+The distribution serializes admin lifecycle operations in its plugin scope.
+The same task waits for the kernel operation and updates the registry before
+the next admin operation starts. Dropping the client leaves this task running.
+
 ## Consequences
 
 - Lifecycle operations need a Tokio runtime, which scopes already required

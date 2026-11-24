@@ -196,6 +196,7 @@ async fn run_turn(
         return Err((Some(session), "no agent loop is mounted".into()));
     };
     let mut events = agent_loop.run_turn(TurnRequest {
+        origin: rah_api::agent_loop::TurnOrigin::Background,
         session: session.clone(),
         input,
         cancel,

@@ -16,7 +16,7 @@ use rah_api::{
         ADMIN, AdminError, ConfigChange, ConfigKeyHelp, FeatureInfo, MountRequest, PluginAdmin,
         PluginInstance, Workspace,
     },
-    agent_loop::{WORKSPACE_TURNS, WorkspaceTurns},
+    agent_loop::{LOOP, RUNNING_TURNS, RunningTurns, WORKSPACE_TURNS, WorkspaceTurns},
     async_trait,
     tools::{TOOL_GUARD, TOOL_GUARD_SERVICE, ToolGuard},
 };
@@ -145,8 +145,14 @@ pub struct DistributionPlugin {
 impl DistributionPlugin {
     pub fn new(registry: Arc<Registry>) -> Self {
         Self {
-            manifest: PluginManifest::new(DISTRIBUTION_PLUGIN, env!("CARGO_PKG_VERSION"))
-                .provides(["admin", TOOL_GUARD_SERVICE, "workspace-turns"]),
+            manifest: PluginManifest::new(DISTRIBUTION_PLUGIN, env!("CARGO_PKG_VERSION")).provides(
+                [
+                    "admin",
+                    TOOL_GUARD_SERVICE,
+                    "workspace-turns",
+                    "running-turns",
+                ],
+            ),
             registry,
             workspace: Arc::new(tokio::sync::RwLock::new(true)),
             data_home: None,
@@ -180,7 +186,10 @@ impl Plugin for DistributionPlugin {
             WORKSPACE_TURNS,
             Arc::new(WorkspaceTurns::new(workspace.clone())),
         )?;
+        let running = Arc::new(RunningTurns::default());
+        scope.provide(RUNNING_TURNS, running.clone())?;
         let admin = Admin {
+            running,
             workspace,
             spawner: scope.spawner(),
             kernel: scope.kernel(),
@@ -189,6 +198,7 @@ impl Plugin for DistributionPlugin {
             data_home: self.data_home.clone(),
             file: self.file.clone(),
             writing: Arc::new(Mutex::new(())),
+            operations: Arc::default(),
         };
         scope.provide(ADMIN, Arc::new(admin) as Arc<dyn PluginAdmin>)?;
         scope.provide(TOOL_GUARD, self.registry.clone() as Arc<dyn ToolGuard>)?;
@@ -198,6 +208,7 @@ impl Plugin for DistributionPlugin {
 
 #[derive(Clone)]
 struct Admin {
+    running: Arc<RunningTurns>,
     workspace: Arc<tokio::sync::RwLock<bool>>,
     spawner: rah_api::kernel::Spawner,
     kernel: KernelHandle,
@@ -207,6 +218,7 @@ struct Admin {
     file: Option<PathBuf>,
     /// One persisted change at a time, so none is lost to another's write.
     writing: Arc<Mutex<()>>,
+    operations: Arc<tokio::sync::Mutex<()>>,
 }
 
 fn failed(error: impl std::fmt::Display) -> AdminError {
@@ -278,7 +290,7 @@ impl Admin {
         let mut plugins = Vec::new();
         let mut moved: Vec<(&PluginId, &Value)> = Vec::new();
         for (id, record) in targets.iter().filter(|(_, record)| !record.stopped) {
-            let configured = self.configure(id, rooted(&record.config)).await;
+            let configured = self.configure_owned(id, rooted(&record.config)).await;
             if configured.is_ok() {
                 moved.push((id, &record.config));
             }
@@ -293,7 +305,7 @@ impl Admin {
                     let mut kept = true;
                     for (id, config) in moved.into_iter().rev() {
                         kept &= self
-                            .configure(id, config.clone())
+                            .configure_owned(id, config.clone())
                             .await
                             .is_ok_and(|status| !matches!(status, PluginStatus::Failed { .. }));
                     }
@@ -384,54 +396,48 @@ impl Admin {
     }
 }
 
-#[async_trait]
-impl PluginAdmin for Admin {
-    fn kinds(&self) -> Vec<String> {
-        let mut kinds: Vec<String> = catalog().keys().map(|kind| (*kind).to_owned()).collect();
-        kinds.push(PROCESS_PLUGIN.to_owned());
-        kinds.push(WASM_PLUGIN.to_owned());
-        kinds.sort();
-        kinds
+impl Admin {
+    /// Kernel lifecycle operations outlive the caller. Keep their registry
+    /// updates in the same serialized, distribution-owned task.
+    async fn operation<T, F, Fut>(&self, run: F) -> Result<T, AdminError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Admin) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, AdminError>> + Send,
+    {
+        self.kernel.check_lifecycle_context().map_err(failed)?;
+        let admin = self.clone();
+        let (answer, result) = tokio::sync::oneshot::channel();
+        self.spawner.spawn(async move {
+            let _order = admin.operations.clone().lock_owned().await;
+            let _ = answer.send(run(admin).await);
+        });
+        result
+            .await
+            .map_err(|_| failed("the distribution stopped"))?
     }
 
-    fn config_example(&self, kind: &str) -> Option<Value> {
-        serde_json::from_str(config_example(kind)?).ok()
-    }
-
-    fn config_help(&self, kind: &str) -> Vec<ConfigKeyHelp> {
-        config_help(kind)
-            .iter()
-            .map(|(key, help)| ConfigKeyHelp {
-                key: (*key).to_owned(),
-                help: (*help).to_owned(),
-            })
-            .collect()
-    }
-
-    fn instance(&self, id: &PluginId) -> Option<PluginInstance> {
-        if *id == self.own {
-            return Some(PluginInstance {
-                kind: DISTRIBUTION_PLUGIN.to_owned(),
-                config: Value::Null,
-                locked: true,
-                stopped: false,
-            });
+    fn loop_change(
+        &self,
+        id: &PluginId,
+    ) -> Result<Option<tokio::sync::OwnedRwLockWriteGuard<()>>, AdminError> {
+        match self.kernel.get_instance(LOOP, id.as_str()) {
+            Some(_) => Ok(Some(self.running.try_change()?)),
+            None => Ok(None),
         }
-        self.registry.lock().get(id).map(|record| PluginInstance {
-            kind: record.kind.clone(),
-            config: record.config.clone(),
-            locked: false,
-            stopped: record.stopped,
-        })
     }
 
-    async fn mount(&self, request: MountRequest) -> Result<(PluginId, PluginStatus), AdminError> {
+    async fn mount_owned(
+        &self,
+        request: MountRequest,
+    ) -> Result<(PluginId, PluginStatus), AdminError> {
         let id = self.new_id(&request, false)?;
         let status = self.mount_as(id.clone(), request).await?;
         Ok((id, status))
     }
 
-    async fn unmount(&self, id: &PluginId) -> Result<(), AdminError> {
+    async fn unmount_owned(&self, id: &PluginId) -> Result<(), AdminError> {
+        let _loop_change = self.loop_change(id)?;
         // A stopped plugin is no longer mounted; forget it.
         if self.registry.is_stopped(id) {
             self.registry.lock().remove(id);
@@ -444,11 +450,12 @@ impl PluginAdmin for Admin {
         Ok(())
     }
 
-    async fn configure(
+    async fn configure_owned(
         &self,
         id: &PluginId,
         mut config: Value,
     ) -> Result<PluginStatus, AdminError> {
+        let _loop_change = self.loop_change(id)?;
         self.unlocked(id)?;
         let kind = self
             .registry
@@ -469,12 +476,14 @@ impl PluginAdmin for Admin {
         Ok(status)
     }
 
-    async fn restart(&self, id: &PluginId) -> Result<PluginStatus, AdminError> {
+    async fn restart_owned(&self, id: &PluginId) -> Result<PluginStatus, AdminError> {
+        let _loop_change = self.loop_change(id)?;
         self.unlocked(id)?;
         self.kernel.restart(id).await.map_err(failed)
     }
 
-    async fn stop(&self, id: &PluginId) -> Result<(), AdminError> {
+    async fn stop_owned(&self, id: &PluginId) -> Result<(), AdminError> {
+        let _loop_change = self.loop_change(id)?;
         self.unlocked(id)?;
         let kind = self
             .registry
@@ -500,7 +509,7 @@ impl PluginAdmin for Admin {
         Ok(())
     }
 
-    async fn start(&self, id: &PluginId) -> Result<PluginStatus, AdminError> {
+    async fn start_owned(&self, id: &PluginId) -> Result<PluginStatus, AdminError> {
         let record = self.registry.lock().get(id).cloned();
         let record = match record {
             Some(record) if record.stopped => record,
@@ -517,20 +526,12 @@ impl PluginAdmin for Admin {
         self.mount_as(id.clone(), request).await
     }
 
-    fn stopped(&self) -> Vec<PluginId> {
-        self.registry
-            .lock()
-            .iter()
-            .filter(|(_, record)| record.stopped)
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
-    async fn replace(
+    async fn replace_owned(
         &self,
         old: &PluginId,
         replacement: MountRequest,
     ) -> Result<(PluginId, PluginStatus), AdminError> {
+        let _loop_change = self.loop_change(old)?;
         self.unlocked(old)?;
         let id = self.new_id(&replacement, true)?;
         let status = self
@@ -557,44 +558,7 @@ impl PluginAdmin for Admin {
         Ok((id, status))
     }
 
-    async fn set_workspace(&self, root: &Path) -> Result<Workspace, AdminError> {
-        self.kernel.check_lifecycle_context().map_err(failed)?;
-        let canonical = tokio::fs::canonicalize(root)
-            .await
-            .map_err(|error| failed(format!("`{}`: {error}", root.display())))?;
-        if !canonical.is_dir() {
-            return Err(failed(format!("`{}` is not a directory", root.display())));
-        }
-        let consistent = self.workspace.clone().try_write_owned().map_err(|_| {
-            failed("a turn or workspace switch is running; try again when it finishes")
-        })?;
-        let root = plain_path(canonical);
-        let admin = self.clone();
-        let (answer, result) = tokio::sync::oneshot::channel();
-        // Dropping the caller must leave the task holding the lease through rollback or commit.
-        self.spawner.spawn(async move {
-            let _ = answer.send(admin.switch_workspace(root, consistent).await);
-        });
-        result
-            .await
-            .map_err(|_| failed("the distribution stopped"))?
-    }
-
-    fn features(&self) -> Vec<FeatureInfo> {
-        FEATURES
-            .iter()
-            .map(|feature| FeatureInfo {
-                name: feature.name.to_owned(),
-                summary: feature.summary.to_owned(),
-                enabled: self
-                    .feature_instances(feature)
-                    .iter()
-                    .any(|(_, stopped)| !stopped),
-            })
-            .collect()
-    }
-
-    async fn set_feature(&self, name: &str, enabled: bool) -> Result<(), AdminError> {
+    async fn set_feature_owned(&self, name: &str, enabled: bool) -> Result<(), AdminError> {
         let feature =
             crate::feature(name).ok_or_else(|| failed(format!("unknown feature `{name}`")))?;
         if !enabled {
@@ -602,7 +566,7 @@ impl PluginAdmin for Admin {
                 Mount::Plugin { .. } | Mount::Process { .. } => {
                     for (id, _) in self.feature_instances(feature) {
                         // A stopped one is forgotten, a running one unmounted.
-                        self.unmount(&id).await?;
+                        self.unmount_owned(&id).await?;
                     }
                 }
                 Mount::Replace { from, to } => {
@@ -611,7 +575,7 @@ impl PluginAdmin for Admin {
                             kind: from.to_owned(),
                             ..MountRequest::default()
                         };
-                        self.replace(&id, request).await?;
+                        self.replace_owned(&id, request).await?;
                     }
                 }
             }
@@ -665,7 +629,7 @@ impl PluginAdmin for Admin {
                 }
             }
             if changed {
-                let status = self.configure(&id, Value::Object(config)).await?;
+                let status = self.configure_owned(&id, Value::Object(config)).await?;
                 if status != PluginStatus::Active {
                     return Err(failed(format!(
                         "the policy `{id}` did not restart ({status:?}); `{name}` stays off"
@@ -676,7 +640,7 @@ impl PluginAdmin for Admin {
         let status = match feature.mount {
             Mount::Plugin { .. } | Mount::Process { .. } => {
                 match self.feature_instances(feature).first() {
-                    Some((id, _)) => self.start(id).await?,
+                    Some((id, _)) => self.start_owned(id).await?,
                     None => {
                         let request = MountRequest {
                             kind: feature_kind(feature).to_owned(),
@@ -691,7 +655,7 @@ impl PluginAdmin for Admin {
                         } else {
                             request
                         };
-                        self.mount(request).await?.1
+                        self.mount_owned(request).await?.1
                     }
                 }
             }
@@ -705,7 +669,7 @@ impl PluginAdmin for Admin {
                     kind: to.to_owned(),
                     ..MountRequest::default()
                 };
-                self.replace(&old, request).await?.1
+                self.replace_owned(&old, request).await?.1
             }
         };
         if status != PluginStatus::Active {
@@ -715,6 +679,138 @@ impl PluginAdmin for Admin {
             )));
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl PluginAdmin for Admin {
+    fn kinds(&self) -> Vec<String> {
+        let mut kinds: Vec<String> = catalog().keys().map(|kind| (*kind).to_owned()).collect();
+        kinds.push(PROCESS_PLUGIN.to_owned());
+        kinds.push(WASM_PLUGIN.to_owned());
+        kinds.sort();
+        kinds
+    }
+
+    fn config_example(&self, kind: &str) -> Option<Value> {
+        serde_json::from_str(config_example(kind)?).ok()
+    }
+
+    fn config_help(&self, kind: &str) -> Vec<ConfigKeyHelp> {
+        config_help(kind)
+            .iter()
+            .map(|(key, help)| ConfigKeyHelp {
+                key: (*key).to_owned(),
+                help: (*help).to_owned(),
+            })
+            .collect()
+    }
+
+    fn instance(&self, id: &PluginId) -> Option<PluginInstance> {
+        if *id == self.own {
+            return Some(PluginInstance {
+                kind: DISTRIBUTION_PLUGIN.to_owned(),
+                config: Value::Null,
+                locked: true,
+                stopped: false,
+            });
+        }
+        self.registry.lock().get(id).map(|record| PluginInstance {
+            kind: record.kind.clone(),
+            config: record.config.clone(),
+            locked: false,
+            stopped: record.stopped,
+        })
+    }
+
+    async fn mount(&self, request: MountRequest) -> Result<(PluginId, PluginStatus), AdminError> {
+        self.operation(move |admin| async move { admin.mount_owned(request).await })
+            .await
+    }
+
+    async fn unmount(&self, id: &PluginId) -> Result<(), AdminError> {
+        let id = id.to_owned();
+        self.operation(move |admin| async move { admin.unmount_owned(&id).await })
+            .await
+    }
+
+    async fn configure(&self, id: &PluginId, config: Value) -> Result<PluginStatus, AdminError> {
+        let id = id.to_owned();
+        self.operation(move |admin| async move { admin.configure_owned(&id, config).await })
+            .await
+    }
+
+    async fn restart(&self, id: &PluginId) -> Result<PluginStatus, AdminError> {
+        let id = id.to_owned();
+        self.operation(move |admin| async move { admin.restart_owned(&id).await })
+            .await
+    }
+
+    async fn stop(&self, id: &PluginId) -> Result<(), AdminError> {
+        let id = id.to_owned();
+        self.operation(move |admin| async move { admin.stop_owned(&id).await })
+            .await
+    }
+
+    async fn start(&self, id: &PluginId) -> Result<PluginStatus, AdminError> {
+        let id = id.to_owned();
+        self.operation(move |admin| async move { admin.start_owned(&id).await })
+            .await
+    }
+
+    fn stopped(&self) -> Vec<PluginId> {
+        self.registry
+            .lock()
+            .iter()
+            .filter(|(_, record)| record.stopped)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    async fn replace(
+        &self,
+        old: &PluginId,
+        replacement: MountRequest,
+    ) -> Result<(PluginId, PluginStatus), AdminError> {
+        let old = old.to_owned();
+        self.operation(move |admin| async move { admin.replace_owned(&old, replacement).await })
+            .await
+    }
+
+    async fn set_workspace(&self, root: &Path) -> Result<Workspace, AdminError> {
+        self.kernel.check_lifecycle_context().map_err(failed)?;
+        let canonical = tokio::fs::canonicalize(root)
+            .await
+            .map_err(|error| failed(format!("`{}`: {error}", root.display())))?;
+        if !canonical.is_dir() {
+            return Err(failed(format!("`{}` is not a directory", root.display())));
+        }
+        let consistent = self.workspace.clone().try_write_owned().map_err(|_| {
+            failed("a turn or workspace switch is running; try again when it finishes")
+        })?;
+        let root = plain_path(canonical);
+        self.operation(move |admin| async move { admin.switch_workspace(root, consistent).await })
+            .await
+    }
+
+    fn features(&self) -> Vec<FeatureInfo> {
+        FEATURES
+            .iter()
+            .map(|feature| FeatureInfo {
+                name: feature.name.to_owned(),
+                summary: feature.summary.to_owned(),
+                enabled: self
+                    .feature_instances(feature)
+                    .iter()
+                    .any(|(_, stopped)| !stopped),
+            })
+            .collect()
+    }
+
+    async fn set_feature(&self, name: &str, enabled: bool) -> Result<(), AdminError> {
+        let name = name.to_owned();
+        self.operation(move |admin| async move { admin.set_feature_owned(&name, enabled).await })
+            .await
     }
 
     async fn persist(&self, change: ConfigChange) -> Result<PathBuf, AdminError> {

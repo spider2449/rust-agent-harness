@@ -41,7 +41,8 @@
 //! session (not `repo.commit`), and the user can undo the newest change
 //! through a frontend while every file is still what the change left. A
 //! `tool.after_invoke` handler that runs after the others reads the files
-//! again, so a formatter's rewrite is part of the change. A file larger than
+//! again to verify the write and any formatter transition recorded under
+//! its file lock. A file larger than
 //! `max_file_bytes` or that is not a regular file leaves its call without an
 //! undo. The history is forgotten when the plugin stops or is reconfigured.
 
@@ -67,7 +68,7 @@ use serde_json::{Value, json};
 pub use crate::undo::RepoUndo;
 use crate::{
     fsops::Root,
-    undo::{Call, FileState, read_state},
+    undo::{Call, FileImage, FileState, read_state},
 };
 
 /// Runs after every other `tool.after_invoke` handler (`format-on-write` is
@@ -563,7 +564,9 @@ impl Tool for Patch {
         let mut kept = Some(Vec::new());
         for path in patch_paths(&listing) {
             let state = match fsops::validate(&path) {
-                Ok(()) => read_state(&git.root.path.join(&path), git.root.max_file_bytes).await,
+                Ok(()) => {
+                    FileImage::read(&git.root.path.join(&path), git.root.max_file_bytes).await
+                }
                 Err(_) => Err(()),
             };
             match (state, kept.as_mut()) {
@@ -604,7 +607,7 @@ impl Tool for Patch {
                 after,
             });
         }
-        git.root.history.record(&call(&cx, "repo.patch"), files);
+        git.root.record(&call(&cx, "repo.patch"), files).await;
         Ok(done("patch applied".into()))
     }
 }
