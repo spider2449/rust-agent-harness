@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## v0.45.43 (2026-11-25)
+
+- Add the opt-in `tools-json-edit` plugin for a host-configured JSON integer.
+  Its writes check the full file snapshot and can be undone from the session.
+- Add reproducible small-model evaluations for tool use and edit recovery.
+- Preserve Unix file permissions during edits and undo, and track formatter
+  changes so undo can restore the original file without overwriting newer edits.
+- Keep undo notes, plugin lifecycle operations, and workspace switches
+  consistent across cancellation and overlapping requests.
+- Add `/skills` to the Web composer and clarify where to find local skills
+  and GitHub skill packages.
+- Fix local llama.cpp context usage in the Web status bar.
+
 ## v0.45.42 (2026-11-23)
 
 - Web and Desktop keep the current turn running when someone tries to change
