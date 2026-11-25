@@ -2620,6 +2620,7 @@ dependencies = [
  "rah-plugin-tool-input-repair",
  "rah-plugin-tools-builtin",
  "rah-plugin-tools-http",
+ "rah-plugin-tools-json-edit",
  "rah-plugin-tools-mcp",
  "rah-plugin-tools-repo",
  "rah-plugin-tools-repo-write",
@@ -3003,6 +3004,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rah-plugin-tools-json-edit"
+version = "0.45.42"
+dependencies = [
+ "rah-api",
+ "rah-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

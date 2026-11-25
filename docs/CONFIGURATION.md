@@ -360,6 +360,31 @@ use = "sandbox-os"
 config = { writable = ["/home/me/.cargo/registry"], network = false }
 ```
 
+## Editing a configured JSON integer
+
+Mount `tools-json-edit` explicitly to expose `json.set-integer` for one
+existing unsigned integer in the active workspace. In a configuration that
+extends a guarded preset, add these entries or merge the settings into your
+existing plugin entries.
+
+```toml
+[[plugin]]
+use = "tools-json-edit"
+config = { path = "settings.json", pointer = "/batch/max_items" }
+
+[[plugin]]
+use = "policy-authority"
+config = { tools = { "json.set-integer" = "write" } }
+```
+
+The model supplies only `{"value": 64}`. The tool replaces the selected integer
+token and preserves the rest of the original text. It calls `fs.read` and
+`repo.edit-files` through policy, so both must be available and allowed. Each
+write is recorded by `repo.edit-files` for the session's undo. The tool uses
+two in-flight slots while a nested call runs. When switching workspaces, the
+configured path refers to the same relative location in the active workspace.
+Configured post-write formatters still apply.
+
 ## Tools from elsewhere
 
 **MCP servers** are one `tools-mcp` (stdio) or `tools-mcp-http` (Streamable

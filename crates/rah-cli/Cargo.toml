@@ -39,6 +39,7 @@ rah-plugin-telemetry-log = { path = "../../plugins/telemetry-log" }
 rah-plugin-todo = { path = "../../plugins/todo" }
 rah-plugin-tools-builtin = { path = "../../plugins/tools-builtin" }
 rah-plugin-tools-http = { path = "../../plugins/tools-http" }
+rah-plugin-tools-json-edit = { path = "../../plugins/tools-json-edit" }
 rah-plugin-tools-mcp = { path = "../../plugins/tools-mcp" }
 rah-plugin-tools-repo = { path = "../../plugins/tools-repo" }
 rah-plugin-tools-repo-write = { path = "../../plugins/tools-repo-write" }

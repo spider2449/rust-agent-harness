@@ -184,6 +184,41 @@ async fn edit_files_is_all_or_nothing() {
 }
 
 #[tokio::test]
+async fn full_file_matching_compares_exact_bytes_before_writing_the_batch() {
+    let repo = Repo::new("full-file-match");
+    let tools = repo.tools(json!({})).await;
+    let edit = &tools["repo.edit-files"];
+    let source = repo.read("src/lib.rs");
+
+    let error = edit
+        .call(
+            json!({"edits":[
+                {"path":"src/lib.rs","old":"alpha","new":"gamma"},
+                {"path":"crlf.txt","old":"one\ntwo\n","new":"updated\n","match_entire_file":true}
+            ]}),
+            cx(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ToolError::InvalidInput(message) if message.contains("full `old` snapshot"))
+    );
+    assert_eq!(repo.read("src/lib.rs"), source);
+    assert_eq!(repo.read("crlf.txt"), "one\r\ntwo\r\n");
+
+    edit.call(
+        json!({"edits":[
+            {"path":"crlf.txt","old":"two","new":"three"},
+            {"path":"crlf.txt","old":"one\r\nthree\r\n","new":"updated\n","match_entire_file":true}
+        ]}),
+        cx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repo.read("crlf.txt"), "updated\n");
+}
+
+#[tokio::test]
 async fn patch_applies_checked_diffs_only() {
     let repo = Repo::new("patch");
     let tools = repo.tools(json!({})).await;

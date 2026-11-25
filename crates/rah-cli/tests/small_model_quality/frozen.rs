@@ -114,7 +114,7 @@ impl Mode {
             (
                 Some(edit_tool),
                 format!(
-                    "{goal}\nCall fixture_set-json-value now. Supply only the requested new integer value for the configured field."
+                    "{goal}\nCall json_set-integer now. Supply only the requested new integer value for the configured field."
                 ),
             )
         } else if completed == reads + 1 {

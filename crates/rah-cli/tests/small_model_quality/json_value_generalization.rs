@@ -112,11 +112,22 @@ fn the_holdout_reference_changes_only_its_configured_integer() {
 #[ignore = "requires an isolated llama.cpp with Qwen3-Coder template and the native tool choice proxy"]
 async fn live_small_model_integer_holdout() {
     let (model, run_label, port) = live_settings();
+    let selection = std::env::var("RAH_SMALL_MODEL_CASES").ok();
+    let selected: Vec<_> = selection
+        .as_deref()
+        .map(|ids| ids.split(',').map(str::trim).collect())
+        .unwrap_or_else(|| CASES.iter().map(|case| case.id).collect());
+    for id in &selected {
+        assert!(target(id).is_some(), "unknown integer holdout case `{id}`");
+    }
     eprintln!(
         "small-model integer holdout configuration: {}",
-        json!({"model":model,"run":run_label,"port":port,"set":"integer_holdout"})
+        json!({"model":model,"run":run_label,"port":port,"set":"integer_holdout","cases":selected})
     );
     for (case_index, case) in CASES.iter().enumerate() {
+        if !selected.contains(&case.id) {
+            continue;
+        }
         let task = case.task();
         let order = if case_index % 2 == 0 {
             [false, true, true, false]

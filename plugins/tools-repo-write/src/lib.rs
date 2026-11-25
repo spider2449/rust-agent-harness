@@ -299,7 +299,8 @@ impl Tool for EditFiles {
             "repo.edit-files",
             "Edits existing files: each edit replaces exactly one occurrence of `old` with `new`. \
              All edits are checked first; if any fails, no file is changed. Include enough \
-             surrounding text in `old` to make it unique.",
+             surrounding text in `old` to make it unique. Use `match_entire_file` to require \
+             an exact whole-file match.",
             json!({
                 "type": "object",
                 "properties": {
@@ -312,7 +313,11 @@ impl Tool for EditFiles {
                             "properties": {
                                 "path": { "type": "string", "minLength": 1, "maxLength": 1024 },
                                 "old": { "type": "string", "minLength": 1 },
-                                "new": { "type": "string" }
+                                "new": { "type": "string" },
+                                "match_entire_file": {
+                                    "type": "boolean",
+                                    "description": "Require old to match the entire file byte for byte, including line endings, then write new verbatim. Within a batch, matches the content after prior edits to that file."
+                                }
                             },
                             "required": ["path", "old", "new"],
                             "additionalProperties": false

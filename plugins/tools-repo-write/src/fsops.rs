@@ -21,6 +21,8 @@ pub(crate) struct Edit {
     path: String,
     old: String,
     new: String,
+    #[serde(default)]
+    match_entire_file: bool,
 }
 
 fn invalid(message: impl Into<String>) -> ToolError {
@@ -398,8 +400,18 @@ impl Root {
                 }
             };
             let text = &mut files[index].2;
-            *text = replace_once(text, &edit.old, &edit.new)
-                .map_err(|problem| invalid(format!("`{}`: {problem}", edit.path)))?;
+            *text = if edit.match_entire_file {
+                if *text != edit.old {
+                    return Err(invalid(format!(
+                        "`{}` does not match the full `old` snapshot; read the file again",
+                        edit.path
+                    )));
+                }
+                edit.new
+            } else {
+                replace_once(text, &edit.old, &edit.new)
+                    .map_err(|problem| invalid(format!("`{}`: {problem}", edit.path)))?
+            };
             if text.len() > self.max_file_bytes {
                 return Err(invalid(format!(
                     "`{}` would exceed {} bytes",

@@ -6,36 +6,40 @@ use rah_api::{
     tools::{Invocation, ToolInvoker},
     undo::{UndoError, changes, undo_newest},
 };
-use rah_protocol::{SessionId, ToolCall, ToolCallId, ToolEffect, ToolInput, ToolName};
+use rah_protocol::{SessionId, ToolCall, ToolCallId, ToolContent, ToolEffect, ToolInput, ToolName};
 use serde_json::{Value, json};
 
-use super::{FixtureJsonValue, NAME};
+use super::{NAME, plugin};
 use crate::common::{TempDir, headless, kernel, new_session, turn};
 
 const FILE: &str = "queue.json";
 const EDIT: &str = "repo.edit-files";
 const ORIGINAL: &str = "{\"consumer\":{\"limit\":4},\"producer\":{\"limit\":4}}\r\n";
-const PRODUCER_EDIT: &str = r#"/call fixture.set-json-value {"value":8}"#;
+const PRODUCER_EDIT: &str = r#"/call json.set-integer {"value":8}"#;
 
-async fn setup(dir: &TempDir, approvals: &[&str]) -> Kernel {
+async fn setup(dir: &TempDir, approvals: &[&str], allow_read: bool, repair: bool) -> Kernel {
     let workspace = dir.workspace();
     std::fs::write(workspace.join(FILE), ORIGINAL).unwrap();
     let mut distribution = headless(dir);
-    distribution.set_config(
-        "policy-authority",
-        "tools",
-        json!({NAME:"write",EDIT:"write"}),
+    assert!(
+        !distribution
+            .plugin
+            .iter()
+            .any(|spec| spec.kind == "tools-json-edit")
     );
+    distribution.plugin.push(plugin("stale-edit"));
+    if !repair {
+        distribution
+            .plugin
+            .retain(|spec| spec.kind != "tool-input-repair");
+    }
+    let mut assignments = json!({NAME:"write",EDIT:"write"});
+    if allow_read {
+        assignments["fs.read"] = json!("read");
+    }
+    distribution.set_config("policy-authority", "tools", assignments);
     distribution.set_config("policy-authority", "approve", json!(approvals));
-    let kernel = kernel(&distribution).await;
-    kernel
-        .mount(
-            Arc::new(FixtureJsonValue::new(workspace, "stale-edit")),
-            Default::default(),
-        )
-        .await
-        .unwrap();
-    kernel
+    kernel(&distribution).await
 }
 
 fn invocation(session: &SessionId, name: &str, input: Value) -> Invocation {
@@ -54,16 +58,13 @@ fn invocation(session: &SessionId, name: &str, input: Value) -> Invocation {
 async fn typed_edit_has_one_session_undo_and_restores_original_bytes() {
     let dir = TempDir::new("json-value-undo");
     let file = dir.workspace().join(FILE);
-    let kernel = setup(&dir, &[NAME, EDIT]).await;
+    let kernel = setup(&dir, &[NAME, EDIT], true, true).await;
     let handle = kernel.handle();
     let session = new_session(&handle).await;
 
     turn(&handle, &session, PRODUCER_EDIT).await;
-    let edited: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-    assert_eq!(
-        edited,
-        json!({"consumer":{"limit":4},"producer":{"limit":8}})
-    );
+    let expected = ORIGINAL.replace(r#""producer":{"limit":4}"#, r#""producer":{"limit":8}"#);
+    assert_eq!(std::fs::read(&file).unwrap(), expected.as_bytes());
     let recorded = changes(&handle, &session);
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].tool, EDIT);
@@ -106,16 +107,58 @@ async fn typed_edit_has_one_session_undo_and_restores_original_bytes() {
 }
 
 #[tokio::test]
-async fn repo_write_approval_does_not_authorize_the_typed_tool() {
-    let dir = TempDir::new("json-value-outer-denied");
-    let kernel = setup(&dir, &[EDIT]).await;
+async fn typed_edit_requires_independent_read_and_write_permissions() {
+    for (approvals, allow_read, denied_tool) in [
+        (&[EDIT][..], true, NAME),
+        (&[NAME][..], true, EDIT),
+        (&[NAME, EDIT][..], false, "fs.read"),
+    ] {
+        let dir = TempDir::new("json-value-denied");
+        let kernel = setup(&dir, approvals, allow_read, true).await;
+        let handle = kernel.handle();
+        let session = new_session(&handle).await;
+        let result = ToolInvoker::new(handle.clone())
+            .invoke(invocation(&session, NAME, json!({"value":8})), || {})
+            .await;
+        assert!(result.output.is_error, "{result:?}");
+        assert_eq!(result.authorized, denied_tool != NAME);
+        if result.authorized {
+            assert!(
+                result.output.content.iter().any(|part| matches!(
+                    part, ToolContent::Text(text) if text.contains(denied_tool)
+                )),
+                "{result:?}"
+            );
+        }
+        assert_eq!(result.effect, ToolEffect::None);
+        assert!(changes(&handle, &session).is_empty());
+        assert_eq!(
+            std::fs::read(dir.workspace().join(FILE)).unwrap(),
+            ORIGINAL.as_bytes()
+        );
+        kernel.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn typed_edit_cannot_take_a_path_or_pointer_from_tool_input() {
+    let dir = TempDir::new("json-value-raw-input");
+    let kernel = setup(&dir, &[NAME, EDIT], true, false).await;
     let handle = kernel.handle();
     let session = new_session(&handle).await;
-    let result = ToolInvoker::new(handle.clone())
-        .invoke(invocation(&session, NAME, json!({"value":8})), || {})
-        .await;
-    assert!(result.output.is_error && !result.authorized, "{result:?}");
-    assert_eq!(result.effect, ToolEffect::None);
+    let invoker = ToolInvoker::new(handle.clone());
+    for input in [
+        json!({"value":8,"path":"checks.json"}),
+        json!({"value":8,"pointer":"/consumer/limit"}),
+        json!({"value":"8"}),
+        json!({"value":-1}),
+    ] {
+        let result = invoker
+            .invoke(invocation(&session, NAME, input), || {})
+            .await;
+        assert!(result.authorized && result.output.is_error, "{result:?}");
+        assert_eq!(result.effect, ToolEffect::None);
+    }
     assert!(changes(&handle, &session).is_empty());
     assert_eq!(
         std::fs::read(dir.workspace().join(FILE)).unwrap(),
@@ -145,10 +188,9 @@ impl Plugin for CompetingEdit {
             let invoker = invoker.clone();
             let session = session.clone();
             async move {
-                // Pause the typed write after it reads the snapshot. The shorter
-                // `old` of the second session's edit bypasses this hook branch.
+                // Interleave the other session after the typed tool reads its snapshot.
                 if request.call.name.as_str() == EDIT
-                    && request.call.input.0["edits"][0]["old"].as_str() == Some(ORIGINAL)
+                    && request.call.input.0["edits"][0]["match_entire_file"].as_bool() == Some(true)
                 {
                     let result = invoker
                         .invoke(
@@ -171,18 +213,14 @@ impl Plugin for CompetingEdit {
 }
 
 #[tokio::test]
-async fn repo_substring_match_rejects_overlapping_changes_but_accepts_appended_whitespace() {
-    for (old, new, typed_write_succeeds) in [
-        (
-            r#""consumer":{"limit":4}"#,
-            r#""consumer":{"limit":9}"#,
-            false,
-        ),
-        ("}}\r\n", "}}\r\n ", true),
+async fn typed_edit_rejects_a_stale_snapshot_even_if_only_whitespace_was_appended() {
+    for (old, new) in [
+        (r#""consumer":{"limit":4}"#, r#""consumer":{"limit":9}"#),
+        ("}}\r\n", "}}\r\n "),
     ] {
         let dir = TempDir::new("json-value-competing-edit");
         let file = dir.workspace().join(FILE);
-        let kernel = setup(&dir, &[NAME, EDIT]).await;
+        let kernel = setup(&dir, &[NAME, EDIT], true, true).await;
         let handle = kernel.handle();
         let session = new_session(&handle).await;
         let other = new_session(&handle).await;
@@ -202,21 +240,14 @@ async fn repo_substring_match_rejects_overlapping_changes_but_accepts_appended_w
         let result = ToolInvoker::new(handle.clone())
             .invoke(invocation(&session, NAME, json!({"value":8})), || {})
             .await;
-        assert!(result.authorized, "{result:?}");
-        assert_eq!(result.output.is_error, !typed_write_succeeds, "{result:?}");
+        assert!(result.authorized && result.output.is_error, "{result:?}");
+        assert!(result.output.content.iter().any(|part| matches!(
+            part, ToolContent::Text(text) if text.contains("does not match the full `old` snapshot")
+        )));
         assert_eq!(changes(&handle, &other).len(), 1);
+        assert_eq!(result.effect, ToolEffect::None);
+        assert!(changes(&handle, &session).is_empty());
         let competing_bytes = ORIGINAL.replace(old, new);
-        if typed_write_succeeds {
-            assert_eq!(result.effect, ToolEffect::Completed);
-            assert_eq!(changes(&handle, &session).len(), 1);
-            let expected =
-                competing_bytes.replace("\"producer\":{\"limit\":4}", "\"producer\":{\"limit\":8}");
-            assert_eq!(std::fs::read(&file).unwrap(), expected.as_bytes());
-            undo_newest(&handle, &session).await.unwrap().unwrap();
-        } else {
-            assert_eq!(result.effect, ToolEffect::None);
-            assert!(changes(&handle, &session).is_empty());
-        }
         assert_eq!(std::fs::read(&file).unwrap(), competing_bytes.as_bytes());
         kernel.shutdown().await.unwrap();
     }

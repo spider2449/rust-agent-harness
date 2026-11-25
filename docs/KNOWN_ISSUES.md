@@ -25,6 +25,12 @@ waiting for a job state in both the workspace suite and an isolated run.
 `a_delegate_timeout_withdraws_the_childs_pending_approval` timed out during
 the workspace suite and passed in isolation. The causes are unconfirmed.
 
+## Windows process-plugin storage test can time out
+
+`storage_is_kept_in_the_namespace_of_the_plugin_id` timed out on its first
+storage request during the workspace suite. The same test binary passed when
+run in isolation. The cause is unconfirmed.
+
 ## Bundled Rust diagnostics: detached files without a toolchain
 
 - **Seen:** 2026-11-17, Windows x64, bundled rust-analyzer 2026-11-16.
@@ -197,6 +203,21 @@ the workspace suite and passed in isolation. The causes are unconfirmed.
 - **Open:** improve output-format compliance and evaluate more representative
   bounded repo tasks before making Graphify a default. Successful harness
   execution is not a quality pass. Model settings and user defaults are unchanged.
+
+## CPU-only 7B JSON integer holdout can reach the turn deadline
+
+The `live_small_model_integer_holdout` benchmark on Windows with llama.cpp
+b12658, Qwen2.5-Coder-7B-Instruct Q4_K_M, eight CPU threads, a 4096-token
+context and the Qwen3-Coder template reached its 120-second deadline in two
+`json.set-integer` samples. One updated the file before the verification
+read completed. The other stalled during inference before requesting the
+edit. The file was correct in 7 of 8 samples, and 6 of 8 passed end to end.
+
+A focused rerun with the same settings and
+`RAH_SMALL_MODEL_CASES=sampling-window,worker-timeout` completed all eight
+trials within the deadline. `json.set-integer` passed 4 of 4. Guarded text
+edits passed 1 of 4. One failure hit the 256-token tool response cap. The two
+earlier turn timeouts did not recur, and their cause is unconfirmed.
 
 ## llama.cpp: disabling thinking can add unnecessary tool calls
 

@@ -33,6 +33,7 @@ members = [
     "plugins/tool-input-repair",
     "plugins/tools-builtin",
     "plugins/tools-http",
+    "plugins/tools-json-edit",
     "plugins/tools-mcp",
     "plugins/tools-repo",
     "plugins/tools-repo-write",

@@ -982,6 +982,7 @@ async fn sample(
     }
     let mut approved = vec!["repo.edit-files"];
     if typed_json {
+        distribution.plugin.push(json_value::plugin(&task.id));
         assignments.insert(edit_tool.into(), json!("write"));
         approved.push(edit_tool);
     }
@@ -1034,15 +1035,6 @@ async fn sample(
                     root.clone(),
                     &task.id,
                 )),
-                MountOptions::default(),
-            )
-            .await
-            .unwrap();
-    }
-    if typed_json {
-        kernel
-            .mount(
-                Arc::new(json_value::FixtureJsonValue::new(root.clone(), &task.id)),
                 MountOptions::default(),
             )
             .await

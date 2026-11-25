@@ -589,10 +589,14 @@ under `policy-authority` they are at least `write` whatever their assignment,
 and the presets ask for every call. Paths must be safe repository-relative
 paths and resolve inside the canonical `root` without following a link out of
 it; `repo.create-file` never overwrites. `repo.edit-files` validates every
-edit (exactly one match each) before writing anything and replaces files
-through a temporary file and a rename. `repo.patch` runs `git apply --check`
-then `git apply` through the `sandbox` service, only when Git's top level is
-the configured root; `git apply` rejects paths outside the work tree. None
+edit before writing anything and replaces files through a temporary file
+and a rename. An edit requires one substring match by default. With
+`match_entire_file`, it requires a byte-for-byte match of the entire text,
+including line endings. The check and write run under the provider's file
+locks, which coordinate writes through that provider instance. `repo.patch`
+runs `git apply --check` then `git apply` through the `sandbox` service, only
+when Git's top level is the configured root; `git apply` rejects paths outside
+the work tree. None
 of them writes under `.rah/`, where RAH keeps sessions, memory, skills and
 `rah.toml` and `storage` (the policy among the settings) when the
 workspace contains the default data directory:
