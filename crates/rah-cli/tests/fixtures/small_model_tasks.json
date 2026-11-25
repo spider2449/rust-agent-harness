@@ -1,0 +1,167 @@
+[
+  {
+    "id": "service-default",
+    "group": "read",
+    "prompt": "Find the default worker count for the current service, not the legacy service. Reply only as JSON with keys workers, path and line (1-based).",
+    "files": {
+      "service.json": "{\n  \"workers\": 6\n}\n",
+      "legacy-service.json": "{\n  \"workers\": 2\n}\n"
+    },
+    "changes": {},
+    "answer": {
+      "workers": 6,
+      "path": "service.json",
+      "line": 2
+    },
+    "evidence": [
+      "service.json"
+    ]
+  },
+  {
+    "id": "timeout-change",
+    "group": "read",
+    "prompt": "Compare before.json and after.json. Reply only as JSON with keys timeout_before, timeout_after, before_line and after_line for timeout_ms (1-based lines).",
+    "files": {
+      "before.json": "{\n  \"timeout_ms\": 700,\n  \"workers\": 4\n}\n",
+      "after.json": "{\n  \"workers\": 4,\n  \"timeout_ms\": 900\n}\n"
+    },
+    "changes": {},
+    "answer": {
+      "timeout_before": 700,
+      "timeout_after": 900,
+      "before_line": 2,
+      "after_line": 3
+    },
+    "evidence": [
+      "before.json",
+      "after.json"
+    ]
+  },
+  {
+    "id": "active-endpoint",
+    "group": "read",
+    "prompt": "Find the timeout used by the active endpoint in routing.json. Reply only as JSON with keys timeout_ms, path and line (1-based).",
+    "files": {
+      "routing.json": "{\n  \"active\": \"blue\",\n  \"green_timeout_ms\": 500,\n  \"blue_timeout_ms\": 1200\n}\n",
+      "example-routing.json": "{\n  \"active\": \"green\",\n  \"green_timeout_ms\": 300\n}\n"
+    },
+    "changes": {},
+    "answer": {
+      "timeout_ms": 1200,
+      "path": "routing.json",
+      "line": 4
+    },
+    "evidence": [
+      "routing.json"
+    ]
+  },
+  {
+    "id": "batch-limit",
+    "group": "single",
+    "prompt": "Raise batch.max_items to 24 in worker.json. Keep all other settings and files intact.",
+    "files": {
+      "worker.json": "{\"batch\":{\"max_items\":16,\"timeout_ms\":300},\"parallel\":4}\n",
+      "README.md": "Worker settings.\n"
+    },
+    "changes": {
+      "worker.json": "{\"batch\":{\"max_items\":24,\"timeout_ms\":300},\"parallel\":4}\n"
+    }
+  },
+  {
+    "id": "fallback-order",
+    "group": "single",
+    "prompt": "In routing.json, move europe ahead of asia in the fallback array, preserving the order of all other entries and the primary region.",
+    "files": {
+      "routing.json": "{\"primary\":\"us\",\"fallback\":[\"asia\",\"europe\",\"australia\"]}\n"
+    },
+    "changes": {
+      "routing.json": "{\"primary\":\"us\",\"fallback\":[\"europe\",\"asia\",\"australia\"]}\n"
+    }
+  },
+  {
+    "id": "retry-network",
+    "group": "single",
+    "prompt": "In retry.json, enable retry for network errors only. Keep retries for validation errors disabled and keep the attempt limit.",
+    "files": {
+      "retry.json": "{\"network\":false,\"validation\":false,\"max_attempts\":3}\n"
+    },
+    "changes": {
+      "retry.json": "{\"network\":true,\"validation\":false,\"max_attempts\":3}\n"
+    }
+  },
+  {
+    "id": "protocol-version",
+    "group": "cross",
+    "prompt": "Upgrade the client and service message protocol from 2 to 3. Preserve version numbers for cache formats and leave the examples untouched.",
+    "files": {
+      "client.json": "{\"protocol_version\":2,\"cache_version\":2}\n",
+      "service.json": "{\"protocol_version\":2,\"cache_version\":2}\n",
+      "example.json": "{\"protocol_version\":2}\n"
+    },
+    "changes": {
+      "client.json": "{\"protocol_version\":3,\"cache_version\":2}\n",
+      "service.json": "{\"protocol_version\":3,\"cache_version\":2}\n"
+    }
+  },
+  {
+    "id": "queue-rename",
+    "group": "cross",
+    "prompt": "Rename the mail queue to outbound in scheduler.json and worker.json. Preserve the other queues and their settings.",
+    "files": {
+      "scheduler.json": "{\"queues\":[\"mail\",\"reports\"]}\n",
+      "worker.json": "{\"listen\":{\"mail\":2,\"reports\":4}}\n"
+    },
+    "changes": {
+      "scheduler.json": "{\"queues\":[\"outbound\",\"reports\"]}\n",
+      "worker.json": "{\"listen\":{\"outbound\":2,\"reports\":4}}\n"
+    }
+  },
+  {
+    "id": "timeout-units",
+    "group": "cross",
+    "prompt": "Change the payment timeout from 2 seconds to 3. Update the gateway's timeout in milliseconds and the worker's timeout in seconds. Preserve the health timeout.",
+    "files": {
+      "gateway.json": "{\"payment_timeout_ms\":2000,\"health_timeout_ms\":2000}\n",
+      "worker.json": "{\"payment_timeout_s\":2,\"health_timeout_s\":2}\n"
+    },
+    "changes": {
+      "gateway.json": "{\"payment_timeout_ms\":3000,\"health_timeout_ms\":2000}\n",
+      "worker.json": "{\"payment_timeout_s\":3,\"health_timeout_s\":2}\n"
+    }
+  },
+  {
+    "id": "stale-edit",
+    "group": "recovery",
+    "prompt": "Set the producer queue limit to 8. A previous edit failed because the old snippet was missing. Read the current queue.json before retrying. Preserve the consumer limit.",
+    "files": {
+      "queue.json": "{\n  \"consumer\": {\"limit\": 4},\n  \"producer\": {\"limit\": 4}\n}\n"
+    },
+    "changes": {
+      "queue.json": "{\"consumer\":{\"limit\":4},\"producer\":{\"limit\":8}}\n"
+    }
+  },
+  {
+    "id": "rust-type-mismatch",
+    "group": "recovery",
+    "prompt": "A previous check reported E0308 in limits.rs: expected u32, found &str. Correct the numeric literal spelling of the retry limit initializer, keeping its value 3 and leaving the declaration and all other code intact.",
+    "files": {
+      "limits.rs": "pub const RETRY_LIMIT: u32 = \"3\";\npub const WORKERS: u32 = 3;\n"
+    },
+    "changes": {
+      "limits.rs": "pub const RETRY_LIMIT: u32 = 3;\npub const WORKERS: u32 = 3;\n"
+    }
+  },
+  {
+    "id": "repeated-failure",
+    "group": "recovery",
+    "prompt": "The whitespace collapse check in checks.json has failed twice: expected a-b, actual a---b. Fix the slug configuration and preserve the check expectations. Inspect both checks.json and slug.json before editing.",
+    "files": {
+      "slug.json": "{\"collapse_whitespace\":false}\n",
+      "checks.json": "{\"a   b\":\"a-b\"}\n",
+      "README.md": "Slug settings.\n"
+    },
+    "changes": {
+      "slug.json": "{\"collapse_whitespace\":true}\n"
+    }
+  }
+]
