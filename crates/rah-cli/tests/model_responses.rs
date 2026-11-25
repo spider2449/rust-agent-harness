@@ -9,6 +9,7 @@ use std::{
 };
 
 use common::{TempDir, entries, headless, kernel, kinds, new_session, reply, turn};
+use rah_protocol::AgentEvent;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -91,7 +92,8 @@ fn text(reply: &str) -> String {
 }
 
 #[tokio::test]
-async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
+async fn llamacpp_retries_the_current_request_without_replaying_tools() {
+    let partial = sse(&[json!({"type":"response.output_text.delta","delta":"abandoned"})]);
     let (origin, bodies) = fixture(vec![
         (200, "application/json", json!({"status":"ok"}).to_string()),
         (
@@ -100,6 +102,8 @@ async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
             json!({"data":[{"id":"local-model","meta":{"n_ctx":4096}}]}).to_string(),
         ),
         (200, "text/event-stream", echo_call()),
+        (200, "text/event-stream", partial),
+        (504, "text/plain", String::new()),
         (200, "text/event-stream", text("echo said hello")),
     ])
     .await;
@@ -108,6 +112,8 @@ async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
     // The request bodies below are checked by position, without a prompt.
     distribution.set_config("context-default", "system", json!(""));
     distribution.set_config("context-default", "environment", json!(false));
+    distribution.set_config("loop-react", "retries", json!(2));
+    distribution.set_config("loop-react", "retry_delay_ms", json!(1));
     for spec in &mut distribution.plugin {
         if spec.kind == "model-mock" {
             spec.kind = "model-llamacpp".into();
@@ -119,7 +125,27 @@ async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
     let session = new_session(&handle).await;
 
     let events = turn(&handle, &session, "say hello").await;
-    assert_eq!(reply(&events), "echo said hello");
+    assert!(reply(&events).contains("abandoned"), "{events:?}");
+    assert!(
+        matches!(events.last(), Some(AgentEvent::Completed { output, .. })
+            if output.message.content == "echo said hello"),
+        "{events:?}"
+    );
+    let retries: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ModelRetrying {
+                model_request_id,
+                attempt,
+                discard_partial,
+                ..
+            } => Some((model_request_id, *attempt, *discard_partial)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retries.len(), 2);
+    assert_eq!(retries[0], (retries[1].0, 1, true));
+    assert_eq!(retries[1], (retries[0].0, 2, false));
     assert_eq!(
         kinds(&events),
         [
@@ -129,6 +155,8 @@ async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
             "tool-started",
             "tool-finished",
             "model",
+            "retry",
+            "retry",
             "completed"
         ]
     );
@@ -157,6 +185,9 @@ async fn llamacpp_plugin_drives_the_loop_tools_and_session() {
         "{tools:?}"
     );
     let second = bodies[3]["input"].as_array().unwrap();
+    assert_eq!(bodies.len(), 6);
+    assert_eq!(bodies[3], bodies[4]);
+    assert_eq!(bodies[3], bodies[5]);
     assert_eq!(second[2]["type"], "function_call");
     assert_eq!(
         second[3],

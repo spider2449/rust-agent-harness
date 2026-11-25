@@ -47,6 +47,10 @@ pub enum ModelError {
     Cancelled,
     #[error("model transport failed: {0}")]
     Transport(String),
+    /// The provider's transport stopped before the stream completed.
+    /// A caller that can discard this attempt's output may send the request again.
+    #[error("model stream interrupted: {0}")]
+    StreamInterrupted(String),
     /// The provider cannot take the request now and did nothing with it:
     /// rate limited, overloaded or temporarily failing (HTTP 429, 500, 502,
     /// 503, 504 or 529). Opening the request again is safe (ADR 0051).

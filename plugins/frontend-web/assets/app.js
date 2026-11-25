@@ -13,6 +13,7 @@ const state = {
   sessions: [],
   current: null,
   runningSession: null,
+  liveModelStart: null,
   get running() { return this.runningSession !== null; },
   // Preferences kept by the server (`/api/preferences`): display, the
   // folders opened in the session list, recent workspaces, the side panel.
@@ -572,6 +573,7 @@ function awaitTitle() {
 
 async function openSession(id) {
   if (state.current !== id) {
+    state.liveModelStart = null;
     $("live").replaceChildren();
     $("live").hidden = true;
     collapsedEntries.clear();
@@ -890,6 +892,7 @@ function setRunning(running) {
   if (running && !was) startBusy();
   if (!running) {
     stopBusy();
+    state.liveModelStart = null;
     $("live").replaceChildren();
     $("live").hidden = true;
   }
@@ -986,7 +989,7 @@ function busyEvent(event) {
       setBusyPhase("Thinking…");
       break;
     case "model_retrying":
-      setBusyPhase(`Model busy, retry ${event.attempt} of ${event.retries}…`);
+      setBusyPhase(`Retrying model request (${event.attempt} of ${event.retries})…`);
       break;
     case "model_delta":
       setBusyPhase("Writing…");
@@ -1317,14 +1320,21 @@ function onEvent(session, event) {
   }
   eventActivity(event);
   switch (event.type) {
-    case "model_delta":
-      showLive(event.delta);
+    case "model_request_started":
+      state.liveModelStart = null;
       break;
+    case "model_delta":
     case "model_reasoning_started":
-      showLive("[thinking]\n");
+      state.liveModelStart ??= $("live").lastChild?.length ?? 0;
+      showLive(event.type === "model_delta" ? event.delta : "[thinking]\n");
       break;
     case "model_retrying":
-      showLive(`[model busy: ${event.reason}; retry ${event.attempt} of ${event.retries} in ${Math.ceil(event.delay_ms / 1000)} s]\n`);
+      if (event.discard_partial && state.liveModelStart !== null) {
+        const output = $("live").lastChild;
+        output?.deleteData(state.liveModelStart, output.length - state.liveModelStart);
+        state.liveModelStart = null;
+      }
+      showLive(`[model retry ${event.attempt} of ${event.retries} in ${Math.ceil(event.delay_ms / 1000)} s: ${event.reason}]\n`);
       break;
     case "tool_requested":
       showLive(`\n[tool] ${event.tool_call.name} ${JSON.stringify(event.tool_call.input)}\n`);
@@ -2767,7 +2777,7 @@ function eventActivity(event) {
       logActivity("… model request", "muted");
       break;
     case "model_retrying":
-      logActivity(`↻ model busy, retry ${event.attempt} of ${event.retries} in ${Math.ceil(event.delay_ms / 1000)} s`, "warn");
+      logActivity(`↻ model retry ${event.attempt} of ${event.retries} in ${Math.ceil(event.delay_ms / 1000)} s`, "warn");
       break;
     case "tool_requested":
       toolActivity(event.tool_call.name, event.tool_call.input);

@@ -82,9 +82,14 @@ struct RequestTiming {
 }
 
 impl RequestTiming {
-    fn error(self, error: reqwest::Error) -> ModelError {
+    fn error(self, error: reqwest::Error, interrupted: bool) -> ModelError {
+        let failure = if interrupted {
+            ModelError::StreamInterrupted
+        } else {
+            ModelError::Transport
+        };
         if !error.is_timeout() {
-            return E::Transport.into();
+            return failure(E::Transport.to_string());
         }
         let elapsed = self.started.elapsed();
         let idle = self.last_received.unwrap_or(self.started).elapsed();
@@ -101,7 +106,7 @@ impl RequestTiming {
             Some(_) => format!("last response data {} ms ago", idle.as_millis()),
             None => "awaiting response headers".to_owned(),
         };
-        ModelError::Transport(format!(
+        failure(format!(
             "{cause} ({} ms elapsed, {progress})",
             elapsed.as_millis()
         ))
@@ -349,7 +354,7 @@ impl ModelProvider for ResponsesModel {
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                let failure = timing.error(error);
+                let failure = timing.error(error, false);
                 self.forget_discovery().await;
                 return Err(failure);
             }
@@ -416,7 +421,7 @@ fn events(
             let chunk = match next {
                 None => break 'read,
                 Some(Err(None)) => Err(ModelError::Cancelled)?,
-                Some(Err(Some(error))) => Err(timing.error(error))?,
+                Some(Err(Some(error))) => Err(timing.error(error, llamacpp))?,
                 Some(Ok(chunk)) => chunk,
             };
             timing.last_received = Some(Instant::now());
@@ -450,6 +455,11 @@ fn events(
             }
         }
         if !completed {
+            if llamacpp {
+                Err::<(), _>(ModelError::StreamInterrupted(
+                    "the HTTP response ended before the model completed".into(),
+                ))?;
+            }
             sse.finish().map_err(ModelError::from)?;
             Err::<(), _>(ModelError::from(E::Protocol))?;
         }

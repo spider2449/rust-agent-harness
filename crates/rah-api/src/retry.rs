@@ -1,16 +1,11 @@
-//! Opening a model request again when the provider could not take it
-//! (ADR 0051).
-//!
-//! Only the opening is retried: [`ModelError::Unavailable`] and
-//! [`ModelError::Transport`] returned before any event reached the caller.
-//! Nothing has been shown or recorded by then, and a model request has no
-//! external effect (a tool call comes only after a completed stream), so it
-//! is safe to send again. A stream that fails after it opened is never
-//! retried, and neither are rejections, protocol violations or cancellation.
+//! Retry transient model request failures (ADR 0051).
+//! The loops can also retry a provider-marked stream interruption by
+//! discarding that attempt's provisional output before opening the request again.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rah_protocol::ModelRequest;
+use futures::StreamExt;
+use rah_protocol::{AgentEvent, ModelEvent, ModelRequest, ModelRequestId, SessionId, ToolName};
 use tokio_util::sync::CancellationToken;
 
 use rah_kernel::KernelHandle;
@@ -92,6 +87,8 @@ pub struct Retrying<'a> {
     pub retries: u32,
     pub delay: Duration,
     pub reason: &'a str,
+    /// Whether the caller should discard the failed attempt's provisional output.
+    pub discard_partial: bool,
 }
 
 fn retryable(error: &ModelError) -> Option<Option<Duration>> {
@@ -125,19 +122,133 @@ fn jittered(gap: Duration, floor: Duration) -> Duration {
 pub async fn stream(
     model: &dyn ModelProvider,
     kernel: Option<&KernelHandle>,
+    request: ModelRequest,
+    cancel: &CancellationToken,
+    policy: &RetryPolicy,
+    on_retry: impl FnMut(Retrying<'_>) + Send,
+) -> Result<ModelStream, ModelError> {
+    request_with_retry(
+        model,
+        kernel,
+        request,
+        cancel,
+        policy,
+        on_retry,
+        |stream| async move { Ok(stream) },
+    )
+    .await
+}
+
+/// Tool calls become eligible for execution once the model stream completes.
+pub type ModelCalls = Vec<(String, ToolName, serde_json::Value)>;
+
+/// Completes one logical model request, emitting provisional text as it arrives.
+/// Interrupted attempts discard their text and tool calls before retrying.
+pub async fn complete(
+    model: &dyn ModelProvider,
+    kernel: &KernelHandle,
+    request: ModelRequest,
+    cancel: &CancellationToken,
+    policy: &RetryPolicy,
+    (session_id, model_request_id): (&SessionId, &ModelRequestId),
+    emit: impl Fn(AgentEvent) + Send + Sync,
+) -> Result<(String, ModelCalls), ModelError> {
+    request_with_retry(
+        model,
+        Some(kernel),
+        request,
+        cancel,
+        policy,
+        |notice| {
+            emit(AgentEvent::ModelRetrying {
+                session_id: session_id.clone(),
+                model_request_id: model_request_id.clone(),
+                attempt: notice.attempt,
+                retries: notice.retries,
+                delay_ms: u64::try_from(notice.delay.as_millis()).unwrap_or(u64::MAX),
+                reason: notice.reason.to_owned(),
+                discard_partial: notice.discard_partial,
+            });
+        },
+        |stream| collect_attempt(stream, cancel, session_id, model_request_id, &emit),
+    )
+    .await
+}
+
+async fn collect_attempt(
+    mut stream: ModelStream,
+    cancel: &CancellationToken,
+    session_id: &SessionId,
+    model_request_id: &ModelRequestId,
+    emit: &(impl Fn(AgentEvent) + Sync),
+) -> Result<(String, ModelCalls), ModelError> {
+    let (mut text, mut calls, mut reasoning) = (String::new(), Vec::new(), false);
+    loop {
+        let event = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ModelError::Cancelled),
+            event = stream.next() => event,
+        };
+        let event = event.ok_or_else(|| {
+            ModelError::Protocol("the model stream ended without completing".into())
+        })??;
+        match event {
+            ModelEvent::TextDelta { text: delta } => {
+                text.push_str(&delta);
+                emit(AgentEvent::ModelDelta {
+                    session_id: session_id.clone(),
+                    model_request_id: model_request_id.clone(),
+                    delta,
+                });
+            }
+            ModelEvent::ReasoningStarted if !reasoning => {
+                reasoning = true;
+                emit(AgentEvent::ModelReasoningStarted {
+                    session_id: session_id.clone(),
+                    model_request_id: model_request_id.clone(),
+                });
+            }
+            ModelEvent::ReasoningStarted => {}
+            ModelEvent::Usage { usage } => emit(AgentEvent::ModelUsage {
+                session_id: session_id.clone(),
+                model_request_id: model_request_id.clone(),
+                usage,
+            }),
+            ModelEvent::ToolCall {
+                call_id,
+                name,
+                arguments,
+            } => calls.push((call_id, name, arguments)),
+            ModelEvent::Completed => return Ok((text, calls)),
+        }
+    }
+}
+
+async fn request_with_retry<T, F>(
+    model: &dyn ModelProvider,
+    kernel: Option<&KernelHandle>,
     mut request: ModelRequest,
     cancel: &CancellationToken,
     policy: &RetryPolicy,
     mut on_retry: impl FnMut(Retrying<'_>) + Send,
-) -> Result<ModelStream, ModelError> {
+    mut consume: impl FnMut(ModelStream) -> F + Send,
+) -> Result<T, ModelError>
+where
+    F: Future<Output = Result<T, ModelError>> + Send,
+{
     let mut attempt = 0;
     let mut shrunk = false;
     loop {
-        let error = match model.stream(request.clone(), cancel.clone()).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) => error,
+        let (error, opened) = match model.stream(request.clone(), cancel.clone()).await {
+            Ok(stream) => match consume(stream).await {
+                Ok(result) => return Ok(result),
+                Err(error) => (error, true),
+            },
+            Err(error) => (error, false),
         };
-        if let (ModelError::ContextOverflow(_), Some(kernel), false) = (&error, kernel, shrunk) {
+        if let (ModelError::ContextOverflow(_), Some(kernel), false, false) =
+            (&error, kernel, shrunk, opened)
+        {
             shrunk = true;
             let smaller = kernel.waterfall::<ModelOverflow>(request.clone()).await;
             if let Ok(smaller) = smaller
@@ -150,12 +261,18 @@ pub async fn stream(
                     delay: Duration::ZERO,
                     reason: "the request is larger than the model's context window; \
                              sending it again with the history made smaller",
+                    discard_partial: false,
                 });
                 continue;
             }
             return Err(error);
         }
-        let Some(retry_after) = retryable(&error) else {
+        let retry_after = if opened {
+            matches!(error, ModelError::StreamInterrupted(_)).then_some(None)
+        } else {
+            retryable(&error)
+        };
+        let Some(retry_after) = retry_after else {
             return Err(error);
         };
         if attempt >= policy.retries {
@@ -170,6 +287,7 @@ pub async fn stream(
             retries: policy.retries,
             delay,
             reason: &error.to_string(),
+            discard_partial: opened,
         });
         tokio::select! {
             biased;

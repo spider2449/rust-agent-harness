@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use futures::{StreamExt, channel::mpsc};
+use futures::channel::mpsc;
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
     agent_loop::{AgentLoop, LOOP, RunningTurn, RunningTurns, TurnEvent, TurnRequest, TurnStream},
@@ -38,9 +38,9 @@ use rah_api::{
     tools::{Invocation, ToolInvoker},
 };
 use rah_protocol::{
-    AgentErrorCode, AgentEvent, AgentOutput, ContextItem, Message, MessageRole, ModelEvent,
-    ModelRequest, ModelRequestId, RequestId, SessionEntry, SessionId, ToolCall, ToolCallId,
-    ToolDefinition, ToolInput, ToolName,
+    AgentErrorCode, AgentEvent, AgentOutput, ContextItem, Message, MessageRole, ModelRequest,
+    ModelRequestId, RequestId, SessionEntry, SessionId, ToolCall, ToolCallId, ToolDefinition,
+    ToolInput, ToolName,
 };
 use serde::Deserialize;
 
@@ -207,7 +207,7 @@ enum Ended {
     Cancelled,
 }
 
-type Calls = Vec<(String, ToolName, serde_json::Value)>;
+type Calls = rah_api::retry::ModelCalls;
 
 struct Turn {
     origin: rah_api::agent_loop::TurnOrigin,
@@ -459,71 +459,22 @@ impl Turn {
             session_id: self.sid.clone(),
             model_request_id: model_request_id.clone(),
         });
-        let mut stream = rah_api::retry::stream(
+        let response = rah_api::retry::complete(
             model.as_ref(),
-            Some(&self.kernel),
+            &self.kernel,
             request,
             &self.cancel,
             &self.retry,
-            |notice| {
-                self.emit(AgentEvent::ModelRetrying {
-                    session_id: self.sid.clone(),
-                    model_request_id: model_request_id.clone(),
-                    attempt: notice.attempt,
-                    retries: notice.retries,
-                    delay_ms: u64::try_from(notice.delay.as_millis()).unwrap_or(u64::MAX),
-                    reason: notice.reason.to_owned(),
-                });
-            },
-        )
-        .await
-        .map_err(|error| failure(AgentErrorCode::Model, error.to_string()))?;
-        let (mut text, mut calls, mut reasoning) = (String::new(), Vec::new(), false);
-        loop {
-            let event = tokio::select! {
-                biased;
-                () = self.cancel.cancelled() => return Ok(None),
-                () = self.stop.cancelled() => return Ok(None),
-                event = stream.next() => event,
-            };
-            match event {
-                None => {
-                    return Err(failure(
-                        AgentErrorCode::Model,
-                        "the model stream ended without completing",
-                    ));
-                }
-                Some(Err(error)) => return Err(failure(AgentErrorCode::Model, error.to_string())),
-                Some(Ok(ModelEvent::TextDelta { text: delta })) => {
-                    text.push_str(&delta);
-                    self.emit(AgentEvent::ModelDelta {
-                        session_id: self.sid.clone(),
-                        model_request_id: model_request_id.clone(),
-                        delta,
-                    });
-                }
-                Some(Ok(ModelEvent::ReasoningStarted)) if !reasoning => {
-                    reasoning = true;
-                    self.emit(AgentEvent::ModelReasoningStarted {
-                        session_id: self.sid.clone(),
-                        model_request_id: model_request_id.clone(),
-                    });
-                }
-                Some(Ok(ModelEvent::ReasoningStarted)) => {}
-                Some(Ok(ModelEvent::Usage { usage })) => {
-                    self.emit(AgentEvent::ModelUsage {
-                        session_id: self.sid.clone(),
-                        model_request_id: model_request_id.clone(),
-                        usage,
-                    });
-                }
-                Some(Ok(ModelEvent::ToolCall {
-                    call_id,
-                    name,
-                    arguments,
-                })) => calls.push((call_id, name, arguments)),
-                Some(Ok(ModelEvent::Completed)) => return Ok(Some((text, calls))),
-            }
+            (&self.sid, &model_request_id),
+            |event| self.emit(event),
+        );
+        tokio::select! {
+            biased;
+            () = self.cancel.cancelled() => Ok(None),
+            () = self.stop.cancelled() => Ok(None),
+            result = response => result
+                .map(Some)
+                .map_err(|error| failure(AgentErrorCode::Model, error.to_string())),
         }
     }
 

@@ -72,9 +72,7 @@ pub enum AgentEvent {
         /// The reported counts.
         usage: ModelUsage,
     },
-    /// The provider could not take a model request and RAH will open it
-    /// again after a wait (ADR 0051). Nothing of the failed attempt was
-    /// shown or recorded.
+    /// RAH will send the model request again after a wait (ADR 0051).
     ModelRetrying {
         /// Session associated with the operation.
         session_id: SessionId,
@@ -88,11 +86,14 @@ pub enum AgentEvent {
         delay_ms: u64,
         /// Why the attempt failed; carries no credentials.
         reason: String,
+        /// Discard the live output from the interrupted attempt of this request.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        discard_partial: bool,
     },
     /// The model began private reasoning for a model request.
     ///
     /// Progress signal only: reasoning content is never carried. Emitted at
-    /// most once per model request.
+    /// most once per attempt.
     ModelReasoningStarted {
         /// Session associated with the operation.
         session_id: SessionId,

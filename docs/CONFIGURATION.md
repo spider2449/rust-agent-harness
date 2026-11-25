@@ -494,6 +494,9 @@ newest `keep_chars`. Summaries are cached in `storage` and reused; the session
 log is never changed. When a provider says a request does not fit, more is
 summarized and the request is sent once more (ADR 0052). A busy or
 rate-limited model is retried by the loop (`retries`, `retry_delay_ms`).
+These settings also govern retries when a `model-llamacpp` response stream
+times out or disconnects. The loop resends the current model request with
+its tool results and discards the interrupted attempt's partial response.
 
 The `instructions` feature (`context-instructions`, ADR 0061) gives the model
 the workspace root's `AGENTS.md` on every request. `names` changes the file

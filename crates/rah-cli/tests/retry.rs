@@ -33,6 +33,9 @@ impl ModelProvider for Flaky {
         _cancel: CancellationToken,
     ) -> Result<ModelStream, ModelError> {
         if self.opened.fetch_add(1, Ordering::SeqCst) < self.failures {
+            if matches!(self.error, ModelError::StreamInterrupted(_)) {
+                return Ok(Box::pin(futures::stream::iter([Err(self.error.clone())])));
+            }
             return Err(self.error.clone());
         }
         Ok(Box::pin(futures::stream::iter(vec![
@@ -194,6 +197,44 @@ async fn the_last_error_ends_the_turn_when_the_retries_are_used_up() {
     assert!(matches!(events.last(), Some(AgentEvent::Failed { .. })));
     assert_eq!(kinds(&events).iter().filter(|k| **k == "retry").count(), 2);
     assert_eq!(flaky.opened.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn both_loops_bound_retries_of_interrupted_streams() {
+    for loop_kind in ["loop-react", "loop-plan"] {
+        for limit in [0, 1] {
+            let (kernel, _dir, flaky) = boot_with(
+                "retry-interrupted",
+                loop_kind,
+                2,
+                ModelError::StreamInterrupted("read idle timeout".into()),
+                json!(limit),
+            )
+            .await;
+            let handle = kernel.handle();
+            let session = new_session(&handle).await;
+            let events = turn(&handle, &session, "hello").await;
+            assert!(
+                matches!(events.last(), Some(AgentEvent::Failed { message, .. })
+                    if message.contains("read idle timeout")),
+                "{loop_kind}: {events:?}"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        AgentEvent::ModelRetrying {
+                            discard_partial: true,
+                            ..
+                        }
+                    ))
+                    .count(),
+                limit as usize,
+            );
+            assert_eq!(flaky.opened.load(Ordering::SeqCst), limit + 1);
+        }
+    }
 }
 
 #[tokio::test]

@@ -782,13 +782,17 @@ where
                 retries,
                 delay_ms,
                 reason,
+                discard_partial,
                 ..
             } => {
                 stats.model_retries += 1;
+                if discard_partial {
+                    line(out, "\n[partial model output discarded]").await?;
+                }
                 line(
                     out,
                     &format!(
-                        "[model busy: {reason}; retry {attempt} of {retries} in {} s]",
+                        "[model retry {attempt} of {retries} in {} s: {reason}]",
                         delay_ms.div_ceil(1000)
                     ),
                 )

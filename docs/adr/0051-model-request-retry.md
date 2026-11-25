@@ -4,6 +4,9 @@ Status: Accepted
 
 Date: 2026-10-17
 
+Amended to recover interrupted llama.cpp streams using the existing loop
+retry budget.
+
 ## Context
 
 Providers are built with `reqwest::retry::never()`, and nothing above them
@@ -16,8 +19,8 @@ RAH's rule is *never automatically replay uncertain external effects*
 (AGENTS.md). A model request has no external effect: nothing is executed
 until the stream completes and the loop runs the tool calls the model asked
 for, and a request the provider refused before it began did nothing at all.
-Retrying the **opening** is therefore safe. Retrying after output started is
-not: text would be shown or recorded twice.
+Retrying the opening is safe. Retrying an interrupted stream also requires
+discarding its provisional output and any buffered tool calls.
 
 ## Decision
 
@@ -29,8 +32,13 @@ not: text would be shown or recorded twice.
    statuses stay `Rejected`; 401 and 403 stay authentication failures.
 2. **`rah_api::retry::stream`** opens a request through a `ModelProvider` and
    opens it again after `Unavailable` or `Transport` from the opening only.
-   `Rejected`, `Protocol`, `Cancelled` and every error of a stream that has
-   opened are returned at once. The wait is 2, 4, 8, then 10 seconds, ten
+   `Rejected`, `Protocol` and `Cancelled` are returned at once.
+   Both loops also use `rah_api::retry::complete` to consume a stream until
+   completion. `model-llamacpp` reports an interrupted response body as
+   `ModelError::StreamInterrupted`. For that error the loops discard the
+   attempt and resend the same model request, including any tool results
+   already in its context. Opening failures and interruptions share one
+   retry budget. The wait is 2, 4, 8, then 10 seconds, ten
    retries (about 84 seconds), jittered by up to 20%; `Retry-After` can only
    lengthen a wait and is honored up to 15 minutes. Cancelling ends a wait
    with `Cancelled`. When the retries are used up the last error is returned.
@@ -41,20 +49,21 @@ not: text would be shown or recorded twice.
    another and both loops need it. Side requests that are best effort
    (`session-titles`, `context-compact`) do not retry.
 4. **`AgentEvent::ModelRetrying`** (`session_id`, `model_request_id`,
-   `attempt`, `retries`, `delay_ms`, `reason`) reports each wait. It carries no
-   credentials: the reason is the error's text, which providers already keep
-   free of headers and keys. The Web UI and the terminal show it,
-   `telemetry-log` counts retries on the `model_request` record, and the
-   session log does not record it, since the attempt left nothing.
+   `attempt`, `retries`, `delay_ms`, `reason`) reports each wait. The optional
+   `discard_partial` field tells consumers to discard provisional output from
+   the failed attempt. The Web UI removes it and the terminal marks it as
+   discarded. The reason is the provider's error text, which providers keep
+   free of headers and keys. Both frontends show the wait, and
+   `telemetry-log` counts retries on the `model_request` record. The session
+   log records only completed output from that model request.
 
 ## Consequences
 
-- A rate limit or a short outage costs a pause, not a turn. A permanent
-  outage costs about 84 seconds before the turn fails, with progress shown.
+- The default retry schedule adds about 84 seconds of waiting across
+  attempts, plus the time spent on the requests themselves.
 - A provider that wrongly answers 500 for a request it will never accept is
   tried eleven times. `retries = 0` is the opt-out.
-- A request that reached the provider and was lost on the way back
-  (`Transport` while opening) is sent again. The provider may bill the first
-  one; nothing else can have happened.
-- Frontends that match `AgentEvent` exhaustively must handle the new
-  variant (the in-tree ones do).
+- The provider may bill more than one attempt if it started generation
+  before the connection failed.
+- Frontends consuming the serialized `ModelRetrying` event can recognize
+  `discard_partial` to remove abandoned output for the same request ID.

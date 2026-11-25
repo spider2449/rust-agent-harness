@@ -775,7 +775,7 @@ async fn llamacpp_distinguishes_idle_and_total_timeouts_in_a_stream() {
         let model = ResponsesModel::llamacpp(server.origin.clone(), String::new(), config).unwrap();
         let error = collect(&model, request(user("x"))).await.unwrap_err();
         assert!(
-            matches!(&error, ModelError::Transport(message)
+            matches!(&error, ModelError::StreamInterrupted(message)
             if message.contains(expected) && message.contains("last response data")),
             "{error}"
         );
