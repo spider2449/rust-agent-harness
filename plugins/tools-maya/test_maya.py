@@ -1,8 +1,8 @@
 """Run with Maya 2023 or 2025 mayapy. Uses a fresh scene and a loopback port."""
+from contextlib import nullcontext
 import json
 import os
 import random
-import socket
 from pathlib import Path
 import subprocess
 import sys
@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 import socketserver
 import rah_maya
 import maya.utils
@@ -30,10 +31,27 @@ class DesktopRouting(unittest.TestCase):
                 patch.object(os, "startfile", side_effect=AssertionError):
             executable = Path(directory, "maya.exe")
             executable.touch()
+            mayapy = executable.with_name("mayapy.exe")
+            mayapy.touch()
             result = rah_maya.call_maya("maya.locate", {}, None)
-            self.assertEqual(result["content"][0]["json"]["executable"], str(executable))
+            info = result["content"][0]["json"]
+            self.assertEqual(info["executable"], str(executable))
+            self.assertEqual(info["installations"][0], {"executable": str(executable), "mayapy": str(mayapy)})
             os.environ["RAH_MAYA_EXE"] = str(Path(directory, "missing.exe"))
             self.assertIsNone(rah_maya.locate()["executable"])
+
+    def test_registry_lists_2023_and_newer_in_descending_order(self):
+        import winreg
+
+        versions = ["2022", "2023", "2025", "2030", "Capabilities"]
+        with patch.dict(os.environ, {}, clear=True), patch.object(os, "get_exec_path", return_value=[]), \
+                patch.object(winreg, "OpenKey") as open_key, \
+                patch.object(winreg, "QueryInfoKey", return_value=(len(versions), 0, 0)), \
+                patch.object(winreg, "EnumKey", side_effect=lambda _, index: versions[index]), \
+                patch.object(winreg, "QueryValueEx", side_effect=lambda key, _: (key, 0)):
+            open_key.side_effect = lambda _, path, **kwargs: nullcontext(path)
+            candidates = list(rah_maya.executable_candidates())
+        self.assertEqual([p.parts[0] for p in candidates], ["2030", "2025", "2023"])
 
     def test_reuses_registered_port(self):
         with patch.object(rah_maya, "registered_port", return_value=50010), patch.object(os, "startfile") as launch:
@@ -42,20 +60,25 @@ class DesktopRouting(unittest.TestCase):
 
     def test_waits_for_startup_and_only_launches_if_missing(self):
         for running in (False, True):
-            with self.subTest(running=running), patch.object(rah_maya, "registered_port", side_effect=[None, 50010]), \
+            with self.subTest(running=running), patch.dict(os.environ, RAH_MAYA_PORT_NAME=rah_maya.DEFAULT_PORT_NAME), \
+                    patch.object(rah_maya, "registered_port", side_effect=[None, 50010]), \
                     patch.object(rah_maya, "maya_running", return_value=running), \
                     patch.object(os, "startfile") as launch, patch.object(time, "sleep"):
                 self.assertEqual(rah_maya.desktop_port(), 50010)
                 self.assertEqual(launch.call_count, int(not running))
 
+    def test_missing_custom_port_does_not_launch_default_maya(self):
+        with patch.dict(os.environ, RAH_MAYA_PORT_NAME="rahMaya2023"), \
+                patch.object(rah_maya, "registered_port", return_value=None), patch.object(os, "startfile") as launch:
+            with self.assertRaisesRegex(rah_maya.NotStarted, "Open the named MEL command port rahMaya2023"):
+                rah_maya.desktop_port()
+            launch.assert_not_called()
+
 
 class MayaIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            cls.port = probe.getsockname()[1]
-        cls.address = f"127.0.0.1:{cls.port}"
+        cls.address = "rahTest" + uuid4().hex
         maya.standalone.initialize()
         cls.app = QCoreApplication.instance() or QCoreApplication([])
         from maya.app.general import CommandPort
@@ -71,6 +94,10 @@ class MayaIntegration(unittest.TestCase):
                                                 4096, False, "rah_result")
         if error:
             raise RuntimeError(error)
+        with patch.dict(os.environ, RAH_MAYA_PORT_NAME=cls.address):
+            cls.port = rah_maya.registered_port()
+        if cls.port is None:
+            raise RuntimeError(f"Maya did not register {cls.address}")
 
     @classmethod
     def tearDownClass(cls):
@@ -138,6 +165,44 @@ class MayaIntegration(unittest.TestCase):
         self.assertEqual(info["maya"], cmds.about(version=True))
         self.assertEqual(info["executable"], sys.executable)
         self.assertTrue(info["qt"])
+
+    def test_inspect_and_select_in_named_session(self):
+        left = cmds.createNode("transform", name="rahLeft")
+        right = cmds.createNode("transform", name="rahRight")
+        cmds.createNode("transform", parent=left, name="rahChild")
+        cmds.createNode("transform", parent=right, name="rahChild")
+        self.addCleanup(cmds.delete, [left, right])
+
+        def call(name, node):
+            return ("tools/call", {"name": "maya." + name, "arguments": {"node": node}})
+
+        with patch.dict(os.environ, RAH_MAYA_PORT_NAME=self.address):
+            replies = self.rpc([("initialize", {}), call("inspect", "rahChild"),
+                                call("inspect", "|rahLeft|rahChild"), call("select", "|rahRight|rahChild"),
+                                call("select", "*"), call("inspect", "rahMissingNode")])
+        self.assertIn("Ambiguous transform", replies[1]["error"]["message"])
+        inspected = replies[2]["result"]["content"][0]["json"]["result"]
+        self.assertEqual(inspected["path"], "|rahLeft|rahChild")
+        self.assertEqual(inspected["world_position"], [0, 0, 0])
+        self.assertEqual(inspected["local_scale"], [1, 1, 1])
+        self.assertEqual(replies[3]["result"]["content"][0]["json"]["result"], ["|rahRight|rahChild"])
+        self.assertEqual(replies[4]["error"]["data"]["kind"], "invalid_input")
+        self.assertIn("No transform found", replies[5]["error"]["message"])
+
+    def test_rotate_scale_and_verify(self):
+        node = cmds.createNode("transform", name="rahTransform")
+        self.addCleanup(cmds.delete, node)
+        replies = self.rpc([
+            ("initialize", {"config": {"port": self.port}}),
+            ("tools/call", {"name": "maya.rotate", "arguments": {"node": node, "x": 0, "y": 30, "z": 0}}),
+            ("tools/call", {"name": "maya.scale", "arguments": {"node": node, "x": 2, "y": 3, "z": 1}}),
+            ("tools/call", {"name": "maya.inspect", "arguments": {"node": node}}),
+        ])
+        for response in replies[1:4]:
+            self.assertNotIn("error", response)
+        info = replies[3]["result"]["content"][0]["json"]["result"]
+        self.assertAlmostEqual(info["world_rotation"][1], 30)
+        self.assertEqual(info["local_scale"], [2, 3, 1])
 
     def test_evaluators_and_module_paths(self):
         def call(name, **arguments):
@@ -218,11 +283,43 @@ class MayaIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, guide["filename"])
             path.write_text(guide["python_source"], encoding="utf-8")
+            test_scope = {}
+            exec(guide["test_python"].replace("r'C:/work/rah_hello.py'", repr(str(path))), test_scope)
             plugin = cmds.loadPlugin(str(path))[0]
             try:
                 self.assertEqual(cmds.rahHello(), guide["expected"])
+                with self.assertRaisesRegex(RuntimeError, "already loaded"):
+                    test_scope["test_plugin"](str(path))
+                replies = self.rpc([
+                    ("initialize", {"config": {"port": self.port}}),
+                    ("tools/call", {"name": "maya.plugin_status"}),
+                    ("tools/call", {"name": "maya.plugin_status", "arguments": {"plugin": str(path)}}),
+                    ("tools/call", {"name": "maya.plugin_status", "arguments": {"plugin": "rahMissingPlugin"}}),
+                ])
+                loaded, info, missing = [reply["result"]["content"][0]["json"]["result"] for reply in replies[1:4]]
+                self.assertIn(plugin, loaded)
+                self.assertTrue(info["loaded"])
+                self.assertEqual(Path(info["path"]), path)
+                self.assertEqual(info["commands"], ["rahHello"])
+                self.assertFalse(missing["loaded"])
             finally:
                 cmds.unloadPlugin(plugin)
+
+    def test_standalone_guide(self):
+        guide = rah_maya.plugin_guide("standalone")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "rah_hello.py")
+            runner = Path(directory, guide["filename"])
+            path.write_text(rah_maya.PLUGIN_SOURCE, encoding="utf-8")
+            runner.write_text(guide["python_source"], encoding="utf-8")
+            argv = [sys.executable, "-B", str(runner), str(path)]
+            passed = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+            self.assertIn("PASS Maya " + cmds.about(version=True), passed.stdout)
+            path.write_text(rah_maya.PLUGIN_SOURCE.replace("Hello from Maya", "wrong result"), encoding="utf-8")
+            failed = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("Unexpected rahHello result", failed.stderr)
 
     def test_invalid_probes_rejected_before_connection(self):
         for script in ("puts hello", "import sys; print(sys.version);", "from maya import cmds",

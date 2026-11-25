@@ -1,20 +1,38 @@
-# tools-maya：RAH 的 Maya 2025 工具外掛
+# tools-maya：RAH 的 Maya 2023+ 工具外掛
 
-在 **RAH → Settings → Features** 打開 **Maya**。要寫外掛，可以說「幫我寫一個 Maya Python 指令外掛」。模型可先用 `maya.plugin_guide {}` 取得 Python API 2.0 範本，以及在 Script Editor 的 Python 分頁載入、測試和卸載的步驟。讀取範本全程在 RAH 本機完成。
+在 **RAH → Settings → Features** 打開 **Maya**。Windows 完整版使用隨附的 `runtime\bin\python.exe`，精簡版使用 PATH 上的 Python 3.10 以上版本。Maya 外掛測試使用各版本隨附的 `mayapy.exe`。
 
-Windows 完整版使用隨附的 `runtime\bin\python.exe`。精簡版使用 PATH 上的 Python 3.10 以上版本。模型可呼叫 `maya.locate {}` 查找本機的 Maya。工具依序檢查 PATH、`MAYA_LOCATION` 及 Maya 2025 以上版本的安裝登錄資料。也可在啟動 RAH 前用 `RAH_MAYA_EXE` 指定要使用的執行檔絕對路徑。
+## 選擇 Maya 版本
 
-使用 `maya.session {}` 可查詢實際連線的 Maya 執行檔、連接埠、Maya、API、Python、Qt 版本及場景路徑。連線工具會使用已開啟的 Maya。若 Maya 尚未執行，RAH 會啟動查到的程式並等待就緒。Maya 顯示指令核准視窗時，確認後即可繼續。
+`maya.locate {}` 會列出本機找到的 Maya 與相鄰的 `mayapy.exe`，並在 `executable` 欄位回傳自動啟動的首選。搜尋順序為 `RAH_MAYA_EXE`、PATH、`MAYA_LOCATION`、Windows 登錄中的 Maya 2023 以上版本。登錄項目從新版開始查找。可在啟動 RAH 前將 `RAH_MAYA_EXE` 設成指定版本的絕對路徑。
 
-RAH 透過 Maya 2025 在 Windows 預設註冊的 `commandportDefault` 找到場景。若手動關閉過這個入口，可在 Maya 的 Applications 偏好設定恢復預設 command port 並重啟 Maya。關閉 RAH 的 Maya 開關會卸載工具，場景仍由 Maya 管理。
+RAH 預設連上已註冊 `commandportDefault` 的 Maya。沒有 Maya 執行時，RAH 才會使用首選執行檔。若停用過預設入口，可在 Maya 的 Applications 偏好設定恢復並重啟 Maya。
 
-可以對模型說：「建立名為 box 的方塊，移到世界座標 (3, 2, 0)，再告訴我它的位置。」小模型可以每次呼叫一個工具，讀取回傳值後再決定下一步：
+若同時開啟多個版本，請在要操作的版本中用 Script Editor 的 **MEL** 分頁開啟獨立的命名連接埠，再從設好 `RAH_MAYA_PORT_NAME` 的 PowerShell 啟動 RAH。為每個版本使用不同名稱，例如在 Maya 2023 中執行下列指令。
+
+```mel
+commandPort -name "rahMaya2023" -sourceType "mel" -securityWarning;
+```
+
+```powershell
+$env:RAH_MAYA_PORT_NAME = 'rahMaya2023'
+```
+
+命名連接埠需先在目標 Maya 登錄。呼叫 `maya.session {}` 核對連上的 Maya、API、Python、Qt 版本、執行檔及場景路徑，再開始修改場景。用完可在 Maya 執行 `commandPort -name "rahMaya2023" -close;`。Maya 顯示核准視窗時，只允許預期的指令。[Autodesk commandPort 文件](https://help.autodesk.com/cloudhelp/2026/ENU/Maya-Tech-Docs/CommandsPython/commandPort.html)
+
+## 場景操作
+
+可以對模型說「建立名為 box 的方塊，移到世界座標 (3, 2, 0)，再查出它的位置。」依序呼叫 `maya.create`、`maya.move`、`maya.inspect`，用上一步回傳的實際名稱或完整路徑。操作既有場景時，先以 `maya.list` 找到物件。
 
 | 工具 | 輸入範例 | 用途 |
 | --- | --- | --- |
 | `maya.create` | `{"shape":"cube","name":"box"}` | 建立方塊、球、圓柱、平面或圓錐。結果陣列的第一項是 Maya 實際採用的名稱。 |
 | `maya.move` | `{"node":"box","x":3,"y":2,"z":0}` | 設定世界座標的絕對位置。若有同名物件，使用完整路徑。 |
+| `maya.rotate` | `{"node":"box","x":0,"y":30,"z":0}` | 設定絕對世界旋轉，沿用場景的角度單位。 |
+| `maya.scale` | `{"node":"box","x":2,"y":1,"z":1}` | 設定各軸的局部縮放倍率。 |
 | `maya.list` | `{"scope":"selection"}` | 列出選取的 transform 完整路徑；用 `scene` 查整個場景。 |
+| `maya.inspect` | `{"node":"box"}` | 查完整路徑、世界位置、世界旋轉、局部縮放和 shape 路徑。遇到同名物件時，改用 `maya.list` 回傳的完整路徑。 |
+| `maya.select` | `{"node":"\|group1\|box"}` | 選取指定 transform，取代原先的選取，並回傳實際選取的完整路徑。 |
 | `maya.help` | `{"command":"xform"}` | 向已安裝的 Maya 查詢 MEL 命令旗標。 |
 | `maya.eval_mel` | ``{"mel":"string $v = `about -version`; print($v);"}`` | 直接傳入 Script Editor 的 MEL 原始碼。變數與反引號沿用 MEL 語法，字串只需按 JSON 規則轉義。 |
 | `maya.eval_python` | `{"python":"import MetalFkikSwitch\nprint(MetalFkikSwitch.__file__)"}` | 在 Maya 的 Python 環境執行程式碼。匯入的模組與變數可在同一個 Maya 工作階段繼續使用。 |
@@ -24,8 +42,26 @@ RAH 透過 Maya 2025 在 Windows 預設註冊的 `commandportDefault` 找到場�
 
 範例設定允許查詢，修改場景和執行自訂 MEL 或 Python 需經 RAH 確認。本機其他程式也能連線到 command port，Maya 會顯示連線指令的核准視窗。請只允許預期的指令。若執行中斷或報錯，先查場景再決定下一步，部分指令可能已生效。
 
-整合測試使用獨立的 Maya standalone 場景與臨時連接埠，無需模型：
+## 開發與測試自己的 Maya 外掛
+
+1. 呼叫 `maya.plugin_guide {}` 取得 Python API 2.0 指令外掛範本，將 `python_source` 存成該工具回傳的檔名。已有外掛時，直接使用你要驗證的檔案。
+2. 呼叫 `maya.plugin_guide {"topic":"standalone"}` 並儲存回傳的 `test_maya_plugin.py`。把測試中的指令、輸入與預期結果換成你的外掛行為。範本會用絕對路徑載入，核對載入來源，驗證指令註冊與實際回傳，再卸載外掛。
+3. 用 `maya.locate` 查出各個目標版本的 `mayapy` 路徑，在獨立程序中各跑一次。每個版本都應有 `PASS Maya …` 且結束碼為 0。失敗時從 traceback 判斷是載入、註冊、行為或清理步驟出了問題。 [Autodesk standalone 文件](https://help.autodesk.com/cloudhelp/2023/ENU/Maya-Scripting/files/GUID-D457D6A0-1E7F-4ED2-B0B4-8B57153B563B.htm)
 
 ```powershell
-mayapy -B plugins/tools-maya/test_maya.py
+& 'C:/aw/Maya2023/bin/mayapy.exe' -B 'C:/work/test_maya_plugin.py' 'C:/work/rah_hello.py'
+& 'C:/aw/Maya2025/bin/mayapy.exe' -B 'C:/work/test_maya_plugin.py' 'C:/work/rah_hello.py'
+```
+
+使用可丟棄的場景驗證 UI、視窗與 viewport 操作。把 `maya.plugin_guide {}` 回傳的 `test_python` 貼到 Script Editor 的 **Python** 分頁執行，先將範例路徑換成外掛的絕對路徑。若外掛支援 undo/redo，核對操作前、操作後、復原後與重做後的狀態。自訂節點應測試建立、設定輸入屬性及讀取輸出，卸載前刪除測試建立的節點。Windows 的 C++ `.mll` 請用對應 Maya 版本的 SDK 建置，並在每個目標版本用同樣的載入與行為檢查驗證。 [Autodesk loadPlugin 文件](https://help.autodesk.com/cloudhelp/2025/ENU/Maya-Tech-Docs/CommandsPython/loadPlugin.html)
+
+排查時可用 `maya.plugin_status {}` 列出已載入的外掛，或用 `maya.plugin_status {"plugin":"C:/work/rah_hello.py"}` 查載入狀態、實際檔案、指令與節點類型。遇到 Python 相依模組載入問題，用 `maya.python_paths` 對照匯入來源。修改外掛後，先在測試場景卸載再載入，或以新的 `mayapy` 程序重跑。 [Autodesk pluginInfo 文件](https://help.autodesk.com/cloudhelp/2025/ENU/Maya-Tech-Docs/CommandsPython/pluginInfo.html)
+
+## 驗證 RAH 的 Maya 工具
+
+本目錄的整合測試使用獨立的 Maya standalone 場景與臨時命名連接埠，無需模型。可分別用 Maya 2023 和 2025 執行。
+
+```powershell
+& 'C:/aw/Maya2023/bin/mayapy.exe' -B plugins/tools-maya/test_maya.py
+& 'C:/aw/Maya2025/bin/mayapy.exe' -B plugins/tools-maya/test_maya.py
 ```

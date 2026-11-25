@@ -91,7 +91,7 @@ pub const FEATURES: [Feature; 15] = [
     },
     Feature {
         name: "maya",
-        summary: "write Maya 2025 Python plug-ins and work with the desktop scene",
+        summary: "work with Maya 2023+ scenes and test Maya plug-ins",
         argument: None,
         needs_any: &["policy-authority"],
         mount: Mount::Process {
@@ -104,9 +104,14 @@ pub const FEATURES: [Feature; 15] = [
             ("maya.locate", "read"),
             ("maya.session", "read"),
             ("maya.list", "read"),
+            ("maya.inspect", "read"),
+            ("maya.select", "write"),
+            ("maya.plugin_status", "read"),
             ("maya.help", "read"),
             ("maya.create", "write"),
             ("maya.move", "write"),
+            ("maya.rotate", "write"),
+            ("maya.scale", "write"),
             ("maya.eval_mel", "execute"),
             ("maya.eval_python", "execute"),
             ("maya.python_paths", "read"),
@@ -298,7 +303,8 @@ fn maya_launch() -> Value {
         "call_timeout_ms": 150000,
         "inherit_env": ["PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
                         "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "USERNAME", "USERDOMAIN",
-                        "RAH_MAYA_EXE", "MAYA_LOCATION", "MAYA_APP_DIR", "MAYA_MODULE_PATH", "ADSKFLEX_LICENSE_FILE"],
+                        "RAH_MAYA_EXE", "RAH_MAYA_PORT_NAME", "MAYA_LOCATION", "MAYA_APP_DIR",
+                        "MAYA_MODULE_PATH", "ADSKFLEX_LICENSE_FILE"],
         "args": ["-I", "-B", "-c", include_str!("../../../plugins/tools-maya/rah_maya.py")],
     })
 }
@@ -623,6 +629,11 @@ mod tests {
         assert_eq!(maya.kind, crate::PROCESS_PLUGIN);
         assert_eq!(policy(&distribution)["tools"]["maya.plugin_guide"], "read");
         assert_eq!(policy(&distribution)["tools"]["maya.session"], "read");
+        assert_eq!(policy(&distribution)["tools"]["maya.inspect"], "read");
+        assert_eq!(policy(&distribution)["tools"]["maya.select"], "write");
+        assert_eq!(policy(&distribution)["tools"]["maya.rotate"], "write");
+        assert_eq!(policy(&distribution)["tools"]["maya.scale"], "write");
+        assert_eq!(policy(&distribution)["tools"]["maya.plugin_status"], "read");
         assert_eq!(policy(&distribution)["tools"]["maya.eval_mel"], "execute");
         assert_eq!(
             policy(&distribution)["tools"]["maya.eval_python"],

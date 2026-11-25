@@ -1,4 +1,4 @@
-"""RAH process plugin for the built-in Maya 2025 command port."""
+"""RAH process plugin for the Windows Maya 2023+ command port."""
 
 import base64
 import ctypes
@@ -19,6 +19,18 @@ PRIMITIVES = {"cube": "polyCube", "sphere": "polySphere", "cylinder": "polyCylin
               "plane": "polyPlane", "cone": "polyCone"}
 IDENT = r"[A-Za-z_][A-Za-z_0-9]*"
 NODE = rf"\|?(?::?{IDENT}(?::{IDENT})*)(?:\|:?{IDENT}(?::{IDENT})*)*"
+MIN_MAYA_VERSION = 2023
+DEFAULT_PORT_NAME = "commandportDefault"
+STRUCTURED_TOOLS = {"maya.inspect", "maya.select", "maya.plugin_status"}
+TRANSFORM_FLAGS = {
+    "maya.move": "-worldSpace -translation",
+    "maya.rotate": "-worldSpace -rotation",
+    "maya.scale": "-objectSpace -scale",
+}
+TRANSFORM_FIELDS = {
+    "node": {"type": "string"},
+    **{axis: {"type": "number"} for axis in ("x", "y", "z")},
+}
 
 
 def tool(tool_name, description, permission, *, required=None, **fields):
@@ -29,27 +41,37 @@ def tool(tool_name, description, permission, *, required=None, **fields):
 
 
 TOOLS = [
-    tool("locate", "Find the installed Maya executable on this Windows machine before launch.", "read"),
-    tool("plugin_guide", "Start here to write a Maya Python API 2.0 plug-in. Returns a working command "
-         "plug-in and Python testing instructions locally, without connecting to Maya.", "read"),
+    tool("locate", "Find Maya 2023+ installations and their mayapy executables without launching Maya.", "read"),
+    tool("plugin_guide", "Start here to write or test a Maya plug-in. Omit topic for a Python API 2.0 "
+         "command example and GUI test. Use topic=standalone for an isolated mayapy test script.", "read",
+         required=[], topic={"type": "string", "enum": ["command", "standalone"]}),
     tool("session", "Get the connected Maya executable, Maya/API/Python/Qt versions and scene in one call. "
          "Use when the task needs the running environment.", "read"),
-    tool("list", "List transform paths. Choose scene or selection.", "read",
+    tool("list", "List full transform paths. Use selection for selected transforms or scene to find a node.", "read",
          scope={"type": "string", "enum": ["scene", "selection"]}),
+    tool("inspect", "Verify a transform by name or full path from maya.list. Returns world position, "
+         "world rotation, local scale, and shapes.", "read", node={"type": "string"}),
+    tool("select", "Replace the selection with one transform. Pass the full path when names repeat.", "write",
+         node={"type": "string"}),
+    tool("plugin_status", "List loaded Maya plug-ins. Pass a Maya plug-in name or absolute file path "
+         "to see its loaded status, commands, and node types.", "read", required=[], plugin={"type": "string"}),
     tool("create", "Create one polygon primitive. Use the first returned name for later calls.", "write",
          shape={"type": "string", "enum": list(PRIMITIVES)}, name={"type": "string", "pattern": "^" + IDENT + "$"}),
-    tool("move", "Set one transform's absolute world position in scene units.", "write",
-         node={"type": "string"}, x={"type": "number"}, y={"type": "number"}, z={"type": "number"}),
+    tool("move", "Set one transform's absolute world position in scene units.", "write", **TRANSFORM_FIELDS),
+    tool("rotate", "Set one transform's absolute world rotation in the scene's angle units.",
+         "write", **TRANSFORM_FIELDS),
+    tool("scale", "Set one transform's absolute local scale factors. Use 1 to keep an axis at default size.",
+         "write", **TRANSFORM_FIELDS),
     tool("help", "Look up Maya's MEL flags before writing a command, e.g. polyCube.", "read",
          command={"type": "string", "pattern": "^" + IDENT + "$"}),
     tool("python_paths", "Return Maya's sys.path and __file__ for an already imported module. "
          "Omit module to list only sys.path.", "read", required=[], module={"type": "string"}),
     tool("eval_python", "Use for Python imports and scripts in Maya. Prefer maya.list/create/move for "
-         "basic scene tasks. Pass plain Python in the python field, with normal newlines and indentation. "
+         "basic scene tasks and maya.inspect to verify changes. Pass plain Python with normal newlines and indentation. "
          "Example: import maya.cmds as cmds\nprint(cmds.ls(selection=True))\n"
          "Read stdout for print output, result for a single expression. Skip Markdown fences.", "execute",
          python={"type": "string", "minLength": 1, "maxLength": 8192}),
-    tool("eval_mel", "Use for MEL commands. Prefer maya.list/create/move for basic scene tasks. "
+    tool("eval_mel", "Use for MEL commands. Prefer named Maya tools for basic scene tasks. "
          "Check flags with maya.help. Pass plain MEL in the mel field. Example: ls -selection; "
          "Read result for the command value, stdout for print output. Send Python imports to "
          "maya.eval_python. Inspect the scene after execution errors before trying again.", "execute",
@@ -85,6 +107,84 @@ def uninitializePlugin(plugin):
     om.MFnPlugin(plugin).deregisterCommand("rahHello")
 '''
 
+PLUGIN_TEST = '''def test_plugin(path):
+    from pathlib import Path
+    import maya.cmds as cmds
+
+    before = cmds.pluginInfo(query=True, listPlugins=True) or []
+    source = Path(path).resolve()
+    loaded_paths = cmds.pluginInfo(query=True, listPluginsPath=True) or []
+    if any(Path(loaded_path).resolve() == source for loaded_path in loaded_paths):
+        raise RuntimeError(f"{path} was already loaded. Use a fresh Maya session for this test.")
+    loaded = cmds.loadPlugin(path) or []
+    if not loaded:
+        raise RuntimeError(f"Maya did not load {path}. Check for an already loaded plug-in with the same name.")
+    plugin = loaded[0]
+    if plugin in before:
+        raise RuntimeError(f"{plugin} was already loaded. Use a fresh Maya session for this test.")
+    try:
+        loaded_path = cmds.pluginInfo(plugin, query=True, path=True)
+        if Path(loaded_path).resolve() != source:
+            raise AssertionError(f"Expected to load {path}, got {loaded_path}")
+        commands = cmds.pluginInfo(plugin, query=True, command=True) or []
+        if "rahHello" not in commands:
+            raise AssertionError(f"Expected rahHello in registered commands, got {commands!r}")
+        actual = cmds.rahHello()
+        if actual != ["Hello from Maya"]:
+            raise AssertionError(f"Unexpected rahHello result: {actual!r}")
+    finally:
+        cmds.unloadPlugin(plugin)
+    print(f"PASS Maya {cmds.about(version=True)}: {plugin}")
+'''
+
+STANDALONE_MAIN = '''
+
+if __name__ == "__main__":
+    import argparse
+    from pathlib import Path
+    import maya.standalone
+
+    parser = argparse.ArgumentParser(description="Smoke test a Maya command plug-in")
+    parser.add_argument("plugin", type=Path)
+    args = parser.parse_args()
+    if not args.plugin.is_absolute() or not args.plugin.is_file():
+        parser.error("plugin must be an existing absolute file path")
+    maya.standalone.initialize()
+    try:
+        test_plugin(str(args.plugin))
+    finally:
+        maya.standalone.uninitialize()
+'''
+
+
+def plugin_guide(topic):
+    if topic == "standalone":
+        return {
+            "filename": "test_maya_plugin.py",
+            "python_source": PLUGIN_TEST + STANDALONE_MAIN,
+            "steps": [
+                "Save python_source as test_maya_plugin.py. Adapt test_plugin to check your actual "
+                "commands or node behavior and clean up test nodes before unloading.",
+                "Use maya.locate to get the mayapy path for each target version. Run the script "
+                "with that mayapy and pass the plug-in's absolute path.",
+                "Check the exit code and PASS line for each version. Failed checks raise a traceback. "
+                "Use a disposable Maya GUI scene for UI and viewport tests.",
+            ],
+            "powershell_example": (
+                "& 'C:/aw/Maya2023/bin/mayapy.exe' -B 'C:/work/test_maya_plugin.py' 'C:/work/rah_hello.py'"),
+        }
+    return {
+        "filename": "rah_hello.py",
+        "python_source": PLUGIN_SOURCE,
+        "instructions": "Save the source as rah_hello.py. Open a disposable Maya scene and run test_python "
+                        "in Script Editor's Python tab after replacing the absolute path. "
+                        "Unload before editing and loading again. Use maya.plugin_status to check "
+                        "plug-ins and maya.python_paths to diagnose imported modules. "
+                        "For a headless test, request maya.plugin_guide with topic=standalone.",
+        "test_python": PLUGIN_TEST + "\ntest_plugin(r'C:/work/rah_hello.py')\n",
+        "expected": ["Hello from Maya"],
+    }
+
 
 def compile_mel(name, args):
     spec = next((t for t in TOOLS if t["name"] == name), None)
@@ -113,10 +213,11 @@ def compile_mel(name, args):
         return "ls -long -transforms" + (" -selection" if args["scope"] == "selection" else "") + ";"
     if name == "maya.create":
         return f'{PRIMITIVES[args["shape"]]} -name "{args["name"]}";'
-    if name == "maya.move":
+    if name in TRANSFORM_FLAGS or name in {"maya.inspect", "maya.select"}:
         if not re.fullmatch(NODE, args["node"]):
             raise InvalidInput("node must be a transform name or DAG path, e.g. |group1|box")
-        return 'xform -absolute -worldSpace -translation {x} {y} {z} "{node}";'.format(**args)
+    if name in TRANSFORM_FLAGS:
+        return 'xform -absolute {flags} {x} {y} {z} "{node}";'.format(flags=TRANSFORM_FLAGS[name], **args)
     if name == "maya.help":
         return f'help "{args["command"]}";'
     if name == "maya.session":
@@ -127,7 +228,8 @@ def compile_mel(name, args):
                 "scene=cmds.file(query=True, sceneName=True)))")
         expr = "(lambda cmds: " + expr + ")(__import__('maya.cmds', fromlist=['about']))"
         return "python(" + json.dumps(expr) + ");"
-    if name in ("maya.locate", "maya.plugin_guide", "maya.eval_python", "maya.python_paths"):
+    if name in STRUCTURED_TOOLS or name in ("maya.locate", "maya.plugin_guide", "maya.eval_python",
+                                            "maya.python_paths"):
         return None
     if re.match(r"\s*(?:import\s|from\s+\w+[.\w]*\s+import\s|cmds\.\w+\s*\()", args["mel"]):
         raise InvalidInput("maya.eval_mel accepts MEL. Use maya.eval_python for Python code "
@@ -143,9 +245,17 @@ def packet(value):
     return (json.dumps(value, allow_nan=False) + "\n").encode("ascii")
 
 
+def command_port_name():
+    name = os.environ.get("RAH_MAYA_PORT_NAME", DEFAULT_PORT_NAME)
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9-]{0,106}", name):
+        raise InvalidInput("RAH_MAYA_PORT_NAME must be a Maya command port name, e.g. rahMaya2023")
+    return name
+
+
 def registered_port():
-    # Maya 2025 ServerRegistryMMap stores the bitmap and 34 network-order
+    # Maya 2023 and 2025 ServerRegistryMMap store the bitmap and 34 network-order
     # (108-byte name, u16 port) records in this Windows session mapping.
+    target = command_port_name().encode("ascii")
     record = struct.Struct("!108sH")
     with mmap.mmap(-1, 4 + 34 * record.size, tagname="Maya_Unix_Socket_Share",
                    access=mmap.ACCESS_READ) as mapping:
@@ -153,7 +263,7 @@ def registered_port():
         for index in range(32):
             if bitmap & (1 << index):
                 name, port = record.unpack_from(mapping, 4 + index * record.size)
-                if name.rstrip(b"\0") == b"commandportDefault" and port:
+                if name.rstrip(b"\0") == target and port:
                     return port
     return None
 
@@ -184,7 +294,6 @@ def executable_candidates():
     override = os.environ.get("RAH_MAYA_EXE")
     if override:
         yield Path(override)
-        return
     for directory in os.get_exec_path():
         if Path(directory).is_absolute():
             yield Path(directory) / "maya.exe"
@@ -196,7 +305,8 @@ def executable_candidates():
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Autodesk\Maya",
                             access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
             versions = [winreg.EnumKey(key, i) for i in range(winreg.QueryInfoKey(key)[0])]
-            for version in sorted((v for v in versions if v.isdecimal() and int(v) >= 2025),
+            for version in sorted((v for v in versions if re.fullmatch(r"[0-9]{4}", v)
+                                   and int(v) >= MIN_MAYA_VERSION),
                                   key=int, reverse=True):
                 try:
                     with winreg.OpenKey(key, version + r"\Setup\InstallPath") as install:
@@ -209,17 +319,35 @@ def executable_candidates():
 
 
 def locate():
+    installations = []
+    seen = set()
     for candidate in executable_candidates():
-        if candidate.is_absolute() and candidate.is_file():
-            return {"executable": str(candidate)}
-    return {"executable": None, "instructions": "Open Maya manually or set RAH_MAYA_EXE "
-            "to its absolute executable path before starting RAH."}
+        if not candidate.is_absolute() or not candidate.is_file():
+            continue
+        key = os.path.normcase(str(candidate.resolve()))
+        if key in seen:
+            continue
+        seen.add(key)
+        mayapy = candidate.with_name("mayapy.exe")
+        installations.append({"executable": str(candidate), "mayapy": str(mayapy) if mayapy.is_file() else None})
+    override = os.environ.get("RAH_MAYA_EXE")
+    executable = installations[0]["executable"] if installations else None
+    if override and (not executable or Path(override) != Path(executable)):
+        executable = None
+    result = {"executable": executable, "installations": installations, "port_name": command_port_name()}
+    if executable is None:
+        result["instructions"] = ("Open Maya manually or set RAH_MAYA_EXE to its absolute executable "
+                                  "path before starting RAH.")
+    return result
 
 
 def desktop_port():
     port = registered_port()
     if port is not None:
         return port
+    name = command_port_name()
+    if name != DEFAULT_PORT_NAME:
+        raise NotStarted(f"Open the named MEL command port {name} in the intended Maya session first.")
     if not maya_running():
         # Open a user-owned GUI document application. Leaving RAH must not
         # terminate Maya or discard its unsaved scene.
@@ -229,15 +357,15 @@ def desktop_port():
                 raise NotStarted(installation["instructions"])
             os.startfile(installation["executable"])
         except OSError as exc:
-            raise NotStarted(f"Could not open Maya 2025: {exc}") from exc
+            raise NotStarted(f"Could not open Maya: {exc}") from exc
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         time.sleep(0.5)
         port = registered_port()
         if port is not None:
             return port
-    raise NotStarted("Maya has not registered commandportDefault. Check Maya's Applications "
-                     "preferences for its default command port, then restart Maya.")
+    raise NotStarted(f"Maya has not registered {name}. Check Maya's Applications preferences "
+                     "for its default command port.")
 
 
 # This function runs inside Maya. Its source travels with the request because
@@ -273,21 +401,65 @@ EVALUATE = '''def evaluate(language, source):
         return json.dumps(dict(error=traceback.format_exc(), stdout=out.getvalue(), stderr=err.getvalue()))
 '''
 
+STRUCTURED = '''def structured(action, args):
+    from maya import cmds
+
+    if action == "maya.plugin_status":
+        from os.path import normpath
+        from pathlib import Path
+
+        plugin = args.get("plugin")
+        loaded = sorted(cmds.pluginInfo(query=True, listPlugins=True) or [])
+        if plugin is None:
+            return loaded
+        path = Path(normpath(plugin))
+        if path.is_absolute():
+            plugin = next((name for name in loaded
+                           if Path(normpath(cmds.pluginInfo(name, query=True, path=True))) == path), plugin)
+        if plugin not in loaded:
+            return dict(plugin=plugin, loaded=False)
+        return dict(
+            plugin=plugin,
+            loaded=True,
+            path=cmds.pluginInfo(plugin, query=True, path=True),
+            commands=cmds.pluginInfo(plugin, query=True, command=True) or [],
+            node_types=cmds.pluginInfo(plugin, query=True, dependNode=True) or [],
+        )
+
+    node = args["node"]
+    matches = cmds.ls(node, long=True, type="transform") or []
+    if len(matches) != 1:
+        detail = "No transform found" if not matches else "Ambiguous transform; use a full DAG path"
+        raise ValueError(f"{detail}: {node}")
+    path = matches[0]
+    if action == "maya.select":
+        cmds.select(path, replace=True)
+        return cmds.ls(selection=True, long=True) or []
+    return dict(
+        path=path,
+        type=cmds.nodeType(path),
+        world_position=cmds.xform(path, query=True, worldSpace=True, translation=True),
+        world_rotation=cmds.xform(path, query=True, worldSpace=True, rotation=True),
+        local_scale=cmds.getAttr(path + ".scale")[0],
+        shapes=cmds.listRelatives(path, shapes=True, fullPath=True) or [],
+    )
+
+
+def reply(action, args):
+    import json
+    try:
+        return json.dumps(dict(value=structured(action, args)), allow_nan=False)
+    except Exception as exc:
+        return json.dumps(dict(error=str(exc), stdout="", stderr=""))
+'''
+
 
 def call_maya(name, args, port):
     script = compile_mel(name, args)
     if name == "maya.locate":
         return {"content": [{"type": "json", "json": locate()}]}
     if name == "maya.plugin_guide":
-        return {"content": [{"type": "json", "json": {
-            "filename": "rah_hello.py", "python_source": PLUGIN_SOURCE,
-            "instructions": "Save the source as rah_hello.py. In Maya Script Editor's Python tab, "
-                            "replace path with the saved absolute path and run the example. "
-                            "Unload before editing and loading the plug-in again.",
-            "test_python": "import maya.cmds as cmds\npath = r'C:/work/rah_hello.py'\n"
-                           "plugin = cmds.loadPlugin(path)[0]\nprint(cmds.rahHello())\ncmds.unloadPlugin(plugin)",
-            "expected": ["Hello from Maya"],
-        }}]}
+        return {"content": [{"type": "json", "json": plugin_guide(args.get("topic", "command"))}]}
     # Use the built-in MEL endpoint. JSON preserves arrays, scalars and null,
     # and an interpreter error stays distinguishable from a successful value.
     if name in ("maya.eval_python", "maya.eval_mel"):
@@ -299,13 +471,16 @@ def call_maya(name, args, port):
                 "module=m, loaded=m in s.modules, file=vars(s.modules[m]).get('__file__') "
                 "if s.modules.get(m) is not None else None)}))(__import__('sys'),"
                 + ascii(args.get("module")) + ")")
+    elif name in STRUCTURED_TOOLS:
+        expr = ("(lambda g: (exec(" + ascii(STRUCTURED) + ",g),g['reply']("
+                + repr(name) + "," + ascii(args) + "))[1])({})")
     else:
         expr = ("__import__('json').dumps({'value': "
                 "__import__('maya.mel', fromlist=['eval']).eval(" + ascii(script) + ")}, allow_nan=False)")
     request = "python(" + json.dumps(expr) + ");\n"
     # Preserve room for source that fit the port before output capture added
     # a wrapper. Decide the encoding before sending the command exactly once.
-    if len(request) > 4095 and name in ("maya.eval_python", "maya.eval_mel"):
+    if len(request) > 4095 and (name in STRUCTURED_TOOLS or name in ("maya.eval_python", "maya.eval_mel")):
         encoded = base64.b64encode(zlib.compress(expr.encode("ascii"))).decode("ascii")
         expr = "eval(__import__('zlib').decompress(__import__('base64').b64decode('" + encoded + "')))"
         request = "python(" + json.dumps(expr) + ");\n"
