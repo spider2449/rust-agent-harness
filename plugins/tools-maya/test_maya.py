@@ -26,19 +26,61 @@ PLUGIN = Path(__file__).with_name("rah_maya.py").resolve()
 
 
 class DesktopRouting(unittest.TestCase):
-    def test_locate_uses_machine_path_without_launching(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, clear=True, PATH=directory), \
+    def test_locate_prefers_running_maya_without_launching(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True), \
+                patch.object(rah_maya, "maya_process_ids", return_value=[42]), \
                 patch.object(os, "startfile", side_effect=AssertionError):
+            root = Path(directory)
+            running_bin = root / "running" / "bin"
+            running_bin.mkdir(parents=True)
+            running = running_bin / "maya.exe"
+            running.touch()
+            mayapy = running.with_name("mayapy.exe")
+            mayapy.touch()
+            installed = root / "maya.exe"
+            installed.touch()
+            with patch.object(rah_maya, "running_executables", return_value=[running]) as query, \
+                    patch.object(rah_maya, "executable_candidates", return_value=[installed, running]):
+                result = rah_maya.call_maya("maya.locate", {}, None)
+            query.assert_called_once_with([42])
+            info = result["content"][0]["json"]
+            self.assertEqual(info["executable"], str(running))
+            self.assertEqual(info["installations"], [
+                {"executable": str(running), "mayapy": str(mayapy)},
+                {"executable": str(installed), "mayapy": None},
+            ])
+
+    def test_locate_falls_back_to_path_without_a_readable_running_path(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, clear=True, PATH=directory), \
+                patch.object(rah_maya, "running_executables", return_value=[]):
             executable = Path(directory, "maya.exe")
             executable.touch()
-            mayapy = executable.with_name("mayapy.exe")
-            mayapy.touch()
-            result = rah_maya.call_maya("maya.locate", {}, None)
-            info = result["content"][0]["json"]
-            self.assertEqual(info["executable"], str(executable))
-            self.assertEqual(info["installations"][0], {"executable": str(executable), "mayapy": str(mayapy)})
-            os.environ["RAH_MAYA_EXE"] = str(Path(directory, "missing.exe"))
-            self.assertIsNone(rah_maya.locate()["executable"])
+            os.environ["RAH_MAYA_EXE"] = str(Path(directory, "missing", "maya.exe"))
+            for process_ids in ([], [42]):
+                with self.subTest(process_ids=process_ids):
+                    self.assertEqual(rah_maya.locate(process_ids)["executable"], str(executable))
+
+    def test_locate_accepts_the_installation_directory(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            executable = bin_dir / "maya.exe"
+            executable.touch()
+            os.environ["MAYA_LOCATION"] = str(root)
+            self.assertEqual(rah_maya.locate(())["executable"], str(executable))
+
+    def test_missing_maya_requests_the_installation_directory(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(rah_maya, "registered_port", return_value=None), \
+                patch.object(rah_maya, "maya_process_ids", return_value=[]), \
+                patch.object(rah_maya, "executable_candidates", return_value=[]), \
+                patch.object(os, "startfile") as launch:
+            info = rah_maya.locate()
+            self.assertIsNone(info["executable"])
+            self.assertIn("provide the Maya installation directory", info["instructions"])
+            with self.assertRaisesRegex(rah_maya.NotStarted, "MAYA_LOCATION"):
+                rah_maya.desktop_port()
+            launch.assert_not_called()
 
     def test_registry_lists_2023_and_newer_in_descending_order(self):
         import winreg
@@ -62,7 +104,8 @@ class DesktopRouting(unittest.TestCase):
         for running in (False, True):
             with self.subTest(running=running), patch.dict(os.environ, RAH_MAYA_PORT_NAME=rah_maya.DEFAULT_PORT_NAME), \
                     patch.object(rah_maya, "registered_port", side_effect=[None, 50010]), \
-                    patch.object(rah_maya, "maya_running", return_value=running), \
+                    patch.object(rah_maya, "maya_process_ids", return_value=[42] if running else []), \
+                    patch.object(rah_maya, "locate", return_value={"executable": "maya.exe"}), \
                     patch.object(os, "startfile") as launch, patch.object(time, "sleep"):
                 self.assertEqual(rah_maya.desktop_port(), 50010)
                 self.assertEqual(launch.call_count, int(not running))

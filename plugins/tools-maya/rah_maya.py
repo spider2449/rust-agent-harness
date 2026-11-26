@@ -2,6 +2,7 @@
 
 import base64
 import ctypes
+from itertools import chain
 import json
 import math
 import mmap
@@ -41,7 +42,9 @@ def tool(tool_name, description, permission, *, required=None, **fields):
 
 
 TOOLS = [
-    tool("locate", "Find Maya 2023+ installations and their mayapy executables without launching Maya.", "read"),
+    tool("locate", "Find Maya and its adjacent mayapy without launching Maya. Prefer a running Maya "
+         "in the current Windows session, then search installed Maya. If none is found, ask the user "
+         "for the Maya installation directory and show the returned setup instructions.", "read"),
     tool("plugin_guide", "Start here to write or test a Maya plug-in. Omit topic for a Python API 2.0 "
          "command example and GUI test. Use topic=standalone for an isolated mayapy test script.", "read",
          required=[], topic={"type": "string", "enum": ["command", "standalone"]}),
@@ -165,13 +168,12 @@ def plugin_guide(topic):
             "steps": [
                 "Save python_source as test_maya_plugin.py. Adapt test_plugin to check your actual "
                 "commands or node behavior and clean up test nodes before unloading.",
-                "Use maya.locate to get the mayapy path for each target version. Run the script "
-                "with that mayapy and pass the plug-in's absolute path.",
+                "Use maya.locate to get the mayapy path for each target version. Set $mayapy to that "
+                "path in PowerShell and pass the plug-in's absolute path to the script.",
                 "Check the exit code and PASS line for each version. Failed checks raise a traceback. "
                 "Use a disposable Maya GUI scene for UI and viewport tests.",
             ],
-            "powershell_example": (
-                "& 'C:/aw/Maya2023/bin/mayapy.exe' -B 'C:/work/test_maya_plugin.py' 'C:/work/rah_hello.py'"),
+            "powershell_example": "& $mayapy -B 'C:/work/test_maya_plugin.py' 'C:/work/rah_hello.py'",
         }
     return {
         "filename": "rah_hello.py",
@@ -268,7 +270,7 @@ def registered_port():
     return None
 
 
-def maya_running():
+def maya_process_ids():
     from ctypes import wintypes
 
     class ProcessInfo(ctypes.Structure):
@@ -284,10 +286,38 @@ def maya_running():
     if not wts.WTSEnumerateProcessesW(None, 0, 1, ctypes.byref(processes), ctypes.byref(count)):
         raise NotStarted("Cannot check whether Maya is running")
     try:
-        return any(p.session == session.value and (p.name or "").lower() == "maya.exe"
-                   for p in processes[:count.value])
+        return sorted(p.pid for p in processes[:count.value]
+                      if p.session == session.value and (p.name or "").lower() == "maya.exe")
     finally:
         wts.WTSFreeMemory(processes)
+
+
+def running_executables(process_ids):
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+    query_path = kernel32.QueryFullProcessImageNameW
+    query_path.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                           ctypes.POINTER(wintypes.DWORD))
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+
+    path = ctypes.create_unicode_buffer(32768)
+    for pid in process_ids:
+        handle = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            continue
+        try:
+            size = wintypes.DWORD(len(path))
+            candidate = Path(path.value) if query_path(handle, 0, path, ctypes.byref(size)) else None
+        finally:
+            close_handle(handle)
+        # A process can exit and its PID can be reused after enumeration.
+        if candidate is not None and candidate.name.casefold() == "maya.exe":
+            yield candidate
 
 
 def executable_candidates():
@@ -318,10 +348,13 @@ def executable_candidates():
         pass
 
 
-def locate():
+def locate(process_ids=None):
+    if process_ids is None:
+        process_ids = maya_process_ids()
     installations = []
     seen = set()
-    for candidate in executable_candidates():
+    running = running_executables(process_ids) if process_ids else ()
+    for candidate in chain(running, executable_candidates()):
         if not candidate.is_absolute() or not candidate.is_file():
             continue
         key = os.path.normcase(str(candidate.resolve()))
@@ -330,14 +363,12 @@ def locate():
         seen.add(key)
         mayapy = candidate.with_name("mayapy.exe")
         installations.append({"executable": str(candidate), "mayapy": str(mayapy) if mayapy.is_file() else None})
-    override = os.environ.get("RAH_MAYA_EXE")
     executable = installations[0]["executable"] if installations else None
-    if override and (not executable or Path(override) != Path(executable)):
-        executable = None
     result = {"executable": executable, "installations": installations, "port_name": command_port_name()}
     if executable is None:
-        result["instructions"] = ("Open Maya manually or set RAH_MAYA_EXE to its absolute executable "
-                                  "path before starting RAH.")
+        result["instructions"] = ("Maya was not found. Please provide the Maya installation directory. "
+                                  "Set MAYA_LOCATION to the absolute directory containing bin\\maya.exe, "
+                                  "then restart RAH. You can also open Maya manually.")
     return result
 
 
@@ -348,11 +379,11 @@ def desktop_port():
     name = command_port_name()
     if name != DEFAULT_PORT_NAME:
         raise NotStarted(f"Open the named MEL command port {name} in the intended Maya session first.")
-    if not maya_running():
+    if not maya_process_ids():
         # Open a user-owned GUI document application. Leaving RAH must not
         # terminate Maya or discard its unsaved scene.
         try:
-            installation = locate()
+            installation = locate(())
             if not installation["executable"]:
                 raise NotStarted(installation["instructions"])
             os.startfile(installation["executable"])
