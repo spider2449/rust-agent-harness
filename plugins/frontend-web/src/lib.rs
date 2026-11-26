@@ -191,7 +191,7 @@ impl WebFrontendPlugin {
     pub fn new(id: impl Into<PluginId>) -> Self {
         Self {
             manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
-                .optional(["loop", "session"]),
+                .optional(["loop", "session", "model"]),
         }
     }
 }

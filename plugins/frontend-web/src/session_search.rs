@@ -63,7 +63,8 @@ pub(crate) async fn search(
         let mut hit = None;
         for record in log.read(&info.id).await? {
             let text = match &record.entry {
-                SessionEntry::TurnStarted { input, .. } => input,
+                SessionEntry::TurnStarted { input, .. }
+                | SessionEntry::UserMessage { input, .. } => input,
                 SessionEntry::AssistantMessage { text, .. } => text,
                 _ => continue,
             };

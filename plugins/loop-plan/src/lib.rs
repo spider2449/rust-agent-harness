@@ -28,7 +28,10 @@ use std::sync::Arc;
 use futures::channel::mpsc;
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
-    agent_loop::{AgentLoop, LOOP, RunningTurn, RunningTurns, TurnEvent, TurnRequest, TurnStream},
+    agent_loop::{
+        AgentLoop, LOOP, RunningTurn, RunningTurns, SteeringInbox, TurnEvent, TurnRequest,
+        TurnSteering, TurnStream,
+    },
     async_trait,
     hooks::ModelBeforeRequest,
     kernel::Spawner,
@@ -148,6 +151,10 @@ struct PlanLoop {
 
 impl AgentLoop for PlanLoop {
     fn run_turn(&self, request: TurnRequest) -> TurnStream {
+        self.run_steerable_turn(request).0
+    }
+
+    fn run_steerable_turn(&self, request: TurnRequest) -> (TurnStream, Option<TurnSteering>) {
         let (sender, receiver) = mpsc::unbounded();
         // One turn per session: a second one records nothing.
         let running = match self.running.admit(&request.session) {
@@ -158,10 +165,12 @@ impl AgentLoop for PlanLoop {
                     code: AgentErrorCode::InvalidRequest,
                     message: reason.into(),
                 });
-                return Box::pin(receiver);
+                return (Box::pin(receiver), None);
             }
         };
+        let (steering, inbox) = TurnSteering::channel();
         let turn = Turn {
+            steering: inbox,
             origin: request.origin,
             kernel: self.kernel.clone(),
             session: self.session.clone(),
@@ -186,7 +195,7 @@ impl AgentLoop for PlanLoop {
             });
         }
         drop(sender);
-        Box::pin(receiver)
+        (Box::pin(receiver), Some(steering))
     }
 }
 
@@ -210,6 +219,7 @@ enum Ended {
 type Calls = rah_api::retry::ModelCalls;
 
 struct Turn {
+    steering: SteeringInbox,
     origin: rah_api::agent_loop::TurnOrigin,
     kernel: KernelHandle,
     session: Arc<dyn SessionLog>,
@@ -224,6 +234,23 @@ struct Turn {
 }
 
 impl Turn {
+    async fn record_steering(
+        &self,
+        items: &mut Vec<ContextItem>,
+        completing: bool,
+    ) -> Result<bool, Failure> {
+        self.steering
+            .record_pending(
+                self.session.as_ref(),
+                &self.sid,
+                &self.id,
+                items,
+                completing,
+            )
+            .await
+            .map_err(|error| failure(AgentErrorCode::Session, error.to_string()))
+    }
+
     fn emit(&self, event: AgentEvent) {
         self.kernel.emit(&TurnEvent {
             event: event.clone(),
@@ -252,6 +279,7 @@ impl Turn {
         {
             Ok(opened) => opened,
             Err(message) => {
+                self.steering.close();
                 drop(running);
                 self.emit(AgentEvent::Failed {
                     session_id: self.sid.clone(),
@@ -312,6 +340,7 @@ impl Turn {
                 }
             }
         };
+        self.steering.close();
         drop(running);
         self.emit(terminal);
     }
@@ -362,7 +391,7 @@ impl Turn {
         items.push(user);
         let invoker = ToolInvoker::new(self.kernel.clone());
         let mut answer = String::new();
-        for (index, step) in steps.iter().enumerate() {
+        'steps: for (index, step) in steps.iter().enumerate() {
             let instruction = ContextItem::System {
                 text: format!(
                     "Plan:\n{plan}\n\nYou are on step {} of {}: {step}\nUse tools as needed. \
@@ -372,21 +401,36 @@ impl Turn {
                 ),
             };
             let mut rounds = 0;
+            let mut steered = false;
             loop {
                 if self.cancelled() {
                     return Ok(Ended::Cancelled);
                 }
+                steered |= self.record_steering(&mut items, false).await?;
                 // With the tool rounds used up, one more request without
                 // tools asks for the step's result from what it has.
-                let last = rounds == self.max_rounds;
-                rounds += 1;
+                let last = rounds >= self.max_rounds;
+                rounds = rounds.saturating_add(1);
                 // The step instruction goes just before the turn's user message.
                 let mut context = items.clone();
                 let at = context
                     .iter()
                     .rposition(|item| matches!(item, ContextItem::User { .. }))
                     .unwrap_or(context.len());
-                context.insert(at, instruction.clone());
+                context.insert(
+                    at,
+                    if steered {
+                        ContextItem::System {
+                            text:
+                                "Continue the turn following the latest user guidance. Adapt the \
+                               earlier plan as needed. Use tools as needed and reply with the \
+                               result when done."
+                                    .into(),
+                        }
+                    } else {
+                        instruction.clone()
+                    },
+                );
                 let tools = if last {
                     context.push(ContextItem::System {
                         text: format!(
@@ -419,12 +463,23 @@ impl Turn {
                 }
                 // Tool calls a provider sends in the last round anyway are not run.
                 if calls.is_empty() || last {
+                    let completing = steered || index + 1 == steps.len();
+                    if completing && self.record_steering(&mut items, true).await? {
+                        steered = true;
+                        continue;
+                    }
                     answer = text;
+                    if completing {
+                        break 'steps;
+                    }
                     break;
                 }
                 for (call_id, name, arguments) in calls {
                     if self.cancelled() {
                         return Ok(Ended::Cancelled);
+                    }
+                    if self.steering.has_pending() {
+                        break;
                     }
                     self.tool_round(&invoker, &mut items, call_id, name, arguments)
                         .await?;

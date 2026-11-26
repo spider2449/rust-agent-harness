@@ -32,6 +32,7 @@
 
 use std::{
     collections::BTreeSet,
+    io::IsTerminal,
     str::FromStr,
     sync::{Arc, Mutex, PoisonError},
     time::Instant,
@@ -42,11 +43,12 @@ use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, PluginStatus,
     Scope,
     admin::ADMIN,
-    agent_loop::{LOOP, TurnRequest},
+    agent_loop::{LOOP, TurnRequest, TurnSteering},
     async_trait,
     hooks::{ApprovalRequest, ToolApproval},
     host::{ExitRequested, Interrupt},
     kernel::PluginStatusChanged,
+    model::answer_side_question,
     session::{SESSION, SessionLog, export::ExportFormat},
     tools::describe_image,
     undo,
@@ -128,7 +130,7 @@ impl CliFrontendPlugin {
     pub fn new(id: impl Into<PluginId>) -> Self {
         Self {
             manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
-                .optional(["loop", "session"]),
+                .optional(["loop", "session", "model"]),
         }
     }
 }
@@ -209,9 +211,18 @@ impl Plugin for CliFrontendPlugin {
             // The hooks above take effect when `apply` returns. A `--prompt`
             // turn started before that finds no approver and is denied.
             until_active(&kernel, &id).await;
+            let interactive = std::io::stdin().is_terminal();
             let stdin = BufReader::new(tokio::io::stdin());
             let stdout = tokio::io::stdout();
-            let repl = run_repl(&kernel, stdin, stdout, options, Some(approvals), running);
+            let repl = run_repl_with_input(
+                &kernel,
+                stdin,
+                stdout,
+                options,
+                Some(approvals),
+                running,
+                interactive,
+            );
             let code = match repl.await {
                 Ok(code) => code,
                 Err(error) => {
@@ -243,7 +254,7 @@ async fn until_active(kernel: &KernelHandle, id: &PluginId) {
 const TURN_COMMANDS: [&str; 2] = ["/call", "/notool"];
 
 /// REPL commands: usage and description, as `/help` lists them.
-const COMMANDS: [(&str, &str); 17] = [
+const COMMANDS: [(&str, &str); 18] = [
     ("/new", "start a new session"),
     ("/sessions", "list sessions"),
     ("/resume <id>", "switch to a session"),
@@ -256,6 +267,10 @@ const COMMANDS: [(&str, &str); 17] = [
         "rename the current session (no title clears it)",
     ),
     ("/history", "show the current session log"),
+    (
+        "/btw <question>",
+        "ask a side question using the session history",
+    ),
     (
         "/changes",
         "list the file changes of this session that /undo can take back",
@@ -302,10 +317,26 @@ fn suggestions(prefix: &str) -> Vec<&'static str> {
 pub async fn run_repl<R, W>(
     kernel: &KernelHandle,
     input: R,
+    out: W,
+    options: ReplOptions,
+    approvals: Option<mpsc::Receiver<ApprovalPrompt>>,
+    running: RunningTurn,
+) -> std::io::Result<i32>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    run_repl_with_input(kernel, input, out, options, approvals, running, false).await
+}
+
+async fn run_repl_with_input<R, W>(
+    kernel: &KernelHandle,
+    input: R,
     mut out: W,
     options: ReplOptions,
     mut approvals: Option<mpsc::Receiver<ApprovalPrompt>>,
     running: RunningTurn,
+    interactive: bool,
 ) -> std::io::Result<i32>
 where
     R: AsyncBufRead + Unpin,
@@ -378,6 +409,7 @@ where
             lines: &mut lines,
             approvals: &mut approvals,
             running: &running,
+            interactive: false,
         };
         let before = match sessions.read(&current).await {
             Ok(records) => records.last().map_or(0, |record| record.seq),
@@ -479,6 +511,14 @@ where
                 }
                 Err(error) => line(&mut out, &format!("error: {error}")).await?,
             },
+            "/btw" => {
+                let (cancel, _running) = running.begin();
+                let answer = match answer_side_question(kernel, &current, argument, cancel).await {
+                    Ok(answer) => format!("[btw] {answer}"),
+                    Err(error) => format!("[btw] {error}"),
+                };
+                line(&mut out, &answer).await?;
+            }
             "/changes" => {
                 let changes = undo::changes(kernel, &current);
                 if changes.is_empty() {
@@ -536,6 +576,7 @@ where
                     lines: &mut lines,
                     approvals: &mut approvals,
                     running: &running,
+                    interactive,
                 };
                 turn(
                     kernel,
@@ -663,6 +704,45 @@ struct Terminal<'a, R, W> {
     lines: &'a mut Lines<R>,
     approvals: &'a mut Option<mpsc::Receiver<ApprovalPrompt>>,
     running: &'a RunningTurn,
+    interactive: bool,
+}
+
+#[derive(Default)]
+struct TerminalSteering {
+    handle: Option<TurnSteering>,
+    pending: Vec<(String, oneshot::Receiver<()>)>,
+}
+
+impl TerminalSteering {
+    async fn send<W: AsyncWrite + Unpin>(
+        &mut self,
+        out: &mut W,
+        text: &str,
+    ) -> std::io::Result<()> {
+        self.pending
+            .retain_mut(|(_, receipt)| receipt.try_recv().is_err());
+        let message = match self.handle.as_ref().map(|handle| handle.send(text)) {
+            Some(Ok(receipt)) => {
+                self.pending.push((text.to_owned(), receipt));
+                "[guidance queued for the current turn]".to_owned()
+            }
+            Some(Err(error)) => format!("[guidance rejected: {error}] {text}"),
+            None => format!("[this loop does not accept guidance during a turn] {text}"),
+        };
+        line(out, &message).await
+    }
+
+    async fn report_unrecorded<W: AsyncWrite + Unpin>(
+        &mut self,
+        out: &mut W,
+    ) -> std::io::Result<()> {
+        for (text, mut receipt) in self.pending.drain(..) {
+            if receipt.try_recv().is_err() {
+                line(out, &format!("\n[guidance was not confirmed] {text}")).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The next confirmation request; pending forever once there is none.
@@ -684,6 +764,7 @@ async fn confirm<R, W>(
     terminal: &mut Terminal<'_, R, W>,
     request: &ApprovalRequest,
     cancel: &CancellationToken,
+    steering: &mut TerminalSteering,
 ) -> std::io::Result<bool>
 where
     R: AsyncBufRead + Unpin,
@@ -700,12 +781,21 @@ where
         request.reason,
         if may_remember { "/a=always" } else { "" }
     );
-    terminal.out.write_all(question.as_bytes()).await?;
-    terminal.out.flush().await?;
-    // `next_line` is cancellation safe: a partly typed answer is kept.
-    let answer = tokio::select! {
-        answer = terminal.lines.next_line() => answer?.unwrap_or_default(),
-        () = cancel.cancelled() => String::new(),
+    let answer = loop {
+        terminal.out.write_all(question.as_bytes()).await?;
+        terminal.out.flush().await?;
+        // `next_line` is cancellation safe: a partly typed answer is kept.
+        let answer = tokio::select! {
+            answer = terminal.lines.next_line() => answer?.unwrap_or_default(),
+            () = cancel.cancelled() => String::new(),
+        };
+        if terminal.interactive
+            && let Some(text) = answer.trim().strip_prefix("/steer ")
+        {
+            steering.send(terminal.out, text).await?;
+            continue;
+        }
+        break answer;
     };
     let answer = answer.trim().to_ascii_lowercase();
     let always = may_remember && matches!(answer.as_str(), "a" | "always");
@@ -744,12 +834,22 @@ where
         return Ok(false);
     };
     let (cancel, _running) = terminal.running.begin();
-    let mut events = agent_loop.run_turn(TurnRequest {
+    let request = TurnRequest {
         origin: rah_api::agent_loop::TurnOrigin::User,
         session: session.clone(),
         input: input.to_owned(),
         cancel: cancel.clone(),
-    });
+    };
+    let (mut events, steering_handle) = if terminal.interactive {
+        agent_loop.run_steerable_turn(request)
+    } else {
+        (agent_loop.run_turn(request), None)
+    };
+    let mut steering = TerminalSteering {
+        handle: steering_handle,
+        ..TerminalSteering::default()
+    };
+    let mut input_open = true;
     loop {
         // Events first: the loop sends `ToolRequested` before it asks for
         // the approval, so a call is shown before its question.
@@ -760,8 +860,24 @@ where
                 let tool = request.request.call.name.as_str();
                 let approved = (request.may_remember()
                     && terminal.running.is_allowed(&request.request.session, tool))
-                    || confirm(terminal, &request, &cancel).await?;
+                    || confirm(terminal, &request, &cancel, &mut steering).await?;
                 let _ = reply.send(approved);
+                continue;
+            }
+            input = terminal.lines.next_line(), if steering.handle.is_some() && input_open => {
+                match input?.as_deref().map(str::trim) {
+                    Some("") => {}
+                    Some(input) => {
+                        if let Some(text) = input.strip_prefix("/steer ") {
+                            steering.send(terminal.out, text).await?;
+                        } else if input.starts_with('/') {
+                            line(terminal.out, "[slash commands are available at the next prompt]").await?;
+                        } else {
+                            steering.send(terminal.out, input).await?;
+                        }
+                    }
+                    None => input_open = false,
+                }
                 continue;
             }
         };
@@ -810,16 +926,19 @@ where
                 line(out, &format!("[tool {label}] {}", render(&output))).await?;
             }
             AgentEvent::Completed { .. } => {
+                steering.report_unrecorded(out).await?;
                 stats.end("completed", None);
                 line(out, "").await?;
                 return Ok(true);
             }
             AgentEvent::Failed { message, .. } => {
+                steering.report_unrecorded(out).await?;
                 line(out, &format!("\n[error] {message}")).await?;
                 stats.end("failed", Some(message));
                 return Ok(false);
             }
             AgentEvent::Cancelled { .. } => {
+                steering.report_unrecorded(out).await?;
                 stats.end("cancelled", None);
                 line(out, "\n[cancelled]").await?;
                 return Ok(false);
@@ -827,6 +946,7 @@ where
             _ => {}
         }
     }
+    steering.report_unrecorded(terminal.out).await?;
     stats.end(
         "stopped",
         Some("the agent loop stopped before the turn ended".into()),
@@ -983,7 +1103,9 @@ fn render(output: &ToolOutput) -> String {
 
 fn describe(entry: &SessionEntry) -> String {
     match entry {
-        SessionEntry::TurnStarted { input, .. } => format!("user: {input}"),
+        SessionEntry::TurnStarted { input, .. } | SessionEntry::UserMessage { input, .. } => {
+            format!("user: {input}")
+        }
         SessionEntry::AssistantMessage { text, .. } => format!("assistant: {text}"),
         SessionEntry::ToolCall {
             name, arguments, ..
@@ -1152,6 +1274,41 @@ mod tests {
         run_turn_requests(running, session, requests, typed).await
     }
 
+    #[tokio::test]
+    async fn guidance_at_the_approval_prompt_keeps_the_decision_separate() {
+        let session = SessionId::new();
+        let running = RunningTurn::default();
+        let mut out = Vec::new();
+        let input = &b"/steer focus on tests\nn\n"[..];
+        let mut lines = BufReader::new(input).lines();
+        let mut terminal = Terminal {
+            out: &mut out,
+            lines: &mut lines,
+            approvals: &mut None,
+            running: &running,
+            interactive: true,
+        };
+        let (handle, inbox) = TurnSteering::channel();
+        let mut steering = TerminalSteering {
+            handle: Some(handle),
+            ..TerminalSteering::default()
+        };
+        let approved = confirm(
+            &mut terminal,
+            &approval(&session, "write", PermissionLevel::Write),
+            &CancellationToken::new(),
+            &mut steering,
+        )
+        .await
+        .unwrap();
+        assert!(!approved);
+        assert!(inbox.has_pending());
+        assert_eq!(steering.pending[0].0, "focus on tests");
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(out.matches("[approve]").count(), 2);
+        assert!(out.contains("[denied]"));
+    }
+
     async fn run_turn_requests(
         running: &RunningTurn,
         session: &SessionId,
@@ -1199,6 +1356,7 @@ mod tests {
             lines: &mut lines,
             approvals: &mut approvals,
             running,
+            interactive: false,
         };
         let mut stats = TurnStats::default();
         assert!(

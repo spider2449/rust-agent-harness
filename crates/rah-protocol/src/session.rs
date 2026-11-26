@@ -24,6 +24,10 @@ pub enum SessionEntry {
         turn: RequestId,
         input: String,
     },
+    UserMessage {
+        turn: RequestId,
+        input: String,
+    },
     AssistantMessage {
         turn: RequestId,
         text: String,

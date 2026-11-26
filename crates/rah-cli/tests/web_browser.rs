@@ -3547,6 +3547,173 @@ async fn an_approval_with_large_input_keeps_its_buttons_in_view() {
 }
 
 #[tokio::test]
+async fn side_question_shortcut_preserves_the_draft_and_the_running_turn() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start_with("web-side-question", |distribution, _| {
+        distribution
+            .set_permissions(rah_cli::Permissions::Ask)
+            .unwrap();
+        distribution.set_config("policy-authority", "tools", json!({ "echo": "write" }));
+    })
+    .await;
+    let browser = Browser::launch(PathBuf::from(program), "web-side-question");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({"url":web.url})).await;
+    page.wait("connected", "connected()").await;
+    page.eval("byId('new-session').click(); true").await;
+    page.wait("composer", "!!state.current && !byId('input').disabled")
+        .await;
+    page.send_message("main task").await;
+    page.wait("pending approval", "approval() && state.running")
+        .await;
+
+    page.eval("byId('input').value = 'main draft'; byId('input').focus(); true")
+        .await;
+    let key = json!({"type":"rawKeyDown", "key":";", "code":"Semicolon", "modifiers":2, "windowsVirtualKeyCode":186});
+    page.call("Input.dispatchKeyEvent", key).await;
+    page.wait(
+        "the shortcut to focus the side question",
+        "byId('side-question-dialog').open && document.activeElement === byId('side-question-input')",
+    )
+    .await;
+    page.eval("byId('side-question-input').value = 'side question marker'; byId('side-question-send').click(); true")
+        .await;
+    page.wait(
+        "an independent reply while the turn is waiting for approval",
+        "byId('side-question-answer').textContent.includes('you said: side question marker') && approval() && state.running",
+    )
+    .await;
+    page.call(
+        "Input.dispatchKeyEvent",
+        json!({"type":"rawKeyDown", "key":"Escape", "code":"Escape", "windowsVirtualKeyCode":27}),
+    )
+    .await;
+    page.wait("the dialog to close", "!byId('side-question-dialog').open")
+        .await;
+    assert_eq!(page.eval("byId('input').value").await, "main draft");
+
+    page.eval("answer('Allow'); true").await;
+    page.wait(
+        "the main turn to finish",
+        "idle() && transcript().includes('echo returned: main task')",
+    )
+    .await;
+    page.send_message("/btw /call echo {}").await;
+    page.wait(
+        "the slash command to answer without tools",
+        "byId('side-question-dialog').open && byId('side-question-answer').textContent.includes('tool echo is not offered')",
+    )
+    .await;
+    let records = page.eval("api(`/sessions/${state.current}`)").await;
+    assert_eq!(records.as_array().unwrap().len(), 5);
+    assert!(!records.to_string().contains("side question marker"));
+    assert!(
+        page.errors().is_empty(),
+        "page errors: {:#?}",
+        page.errors()
+    );
+}
+
+#[tokio::test]
+async fn enter_steers_the_running_turn_without_answering_its_approval() {
+    let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
+        return;
+    };
+    let _one = ONE_BROWSER.lock().await;
+    let web = start_with("web-steering", |distribution, _| {
+        distribution
+            .set_permissions(rah_cli::Permissions::Ask)
+            .unwrap();
+        distribution.set_config("policy-authority", "tools", json!({ "echo": "write" }));
+    })
+    .await;
+    let browser = Browser::launch(PathBuf::from(program), "web-steering");
+    let mut page = browser.page().await;
+    page.call("Page.navigate", json!({"url":web.url})).await;
+    page.wait("connected", "connected()").await;
+    page.eval("byId('new-session').click(); true").await;
+    page.wait("composer", "!!state.current && !byId('input').disabled")
+        .await;
+    page.send_message("first instruction").await;
+    let approval = page.wait("a pending approval", "approval()?.id").await;
+    page.eval("byId('input').value = 'focus on tests'; byId('input').dispatchEvent(new Event('input')); byId('input').focus(); true").await;
+    assert_eq!(page.eval("byId('send').textContent").await, "Steer turn");
+    page.call(
+        "Input.dispatchKeyEvent",
+        json!({"type":"rawKeyDown", "key":"Enter", "code":"Enter", "windowsVirtualKeyCode":13}),
+    )
+    .await;
+    page.wait(
+        "the guidance to be pending",
+        "!!state.steering && byId('send').disabled",
+    )
+    .await;
+    assert_eq!(page.eval("approval()?.id").await, approval);
+    page.eval("answer('Allow'); true").await;
+    page.wait(
+        "the tool from the steered reply to require separate approval",
+        "approval()?.textContent.includes('focus on tests') && byId('input').value === ''",
+    )
+    .await;
+    page.eval("answer('Allow'); true").await;
+    page.wait(
+        "the same turn to finish",
+        "idle() && transcript().includes('echo returned: focus on tests')",
+    )
+    .await;
+    let records = page.eval("api(`/sessions/${state.current}`)").await;
+    let records = records.as_array().unwrap();
+    let kinds: Vec<_> = records
+        .iter()
+        .map(|record| record["entry"]["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "turn_started",
+            "tool_call",
+            "tool_result",
+            "user_message",
+            "tool_call",
+            "tool_result",
+            "assistant_message",
+            "turn_completed"
+        ]
+    );
+    assert_eq!(records[3]["entry"]["turn"], records[0]["entry"]["turn"]);
+    assert_eq!(records[3]["entry"]["input"], "focus on tests");
+
+    page.send_message("another task").await;
+    page.wait(
+        "the next approval",
+        "approval()?.textContent.includes('another task')",
+    )
+    .await;
+    page.eval("byId('input').value = 'keep this draft'; byId('input').dispatchEvent(new Event('input')); byId('send').click(); true").await;
+    page.wait("the second guidance to be pending", "!!state.steering")
+        .await;
+    page.eval("byId('cancel').click(); true").await;
+    page.wait(
+        "the cancelled turn to leave the draft available",
+        "idle() && byId('notice-text').textContent.includes('before confirming')",
+    )
+    .await;
+    assert_eq!(page.eval("byId('input').value").await, "keep this draft");
+    assert_eq!(
+        page.eval("transcript().includes('keep this draft')").await,
+        false
+    );
+    assert!(
+        page.errors().is_empty(),
+        "page errors: {:#?}",
+        page.errors()
+    );
+}
+
+#[tokio::test]
 async fn composer_recovers_focus_and_preserves_ime_confirmation() {
     let Some(program) = std::env::var_os("RAH_TEST_BROWSER") else {
         return;

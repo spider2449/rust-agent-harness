@@ -336,6 +336,12 @@ button.icon { padding: 0 0.428571rem; font-size: 0.857143rem; line-height: 1.285
 .dialog .hint { margin: 0 0 0.714286rem; color: var(--muted); font-size: 0.928571rem; }
 .dialog .notice { margin: 0.571429rem 0 0; }
 .dialog .buttons { display: flex; justify-content: flex-end; gap: 0.571429rem; margin-top: 0.857143rem; }
+#side-question-form label { display: block; margin: 0.714286rem 0 0.285714rem; }
+#side-question-input {
+  display: block; width: 100%; resize: vertical; font: inherit; color: var(--text);
+  padding: 0.571429rem; border: 1px solid var(--line); border-radius: 0.571429rem; background: var(--bg);
+}
+#side-question-answer { margin-top: 1rem; overflow-wrap: anywhere; }
 .dialog.settings { width: min(54.285714rem, calc(100vw - 2.285714rem)); overflow: hidden; }
 /* Header, tabs and message stay put; only the body scrolls. */
 .dialog.settings[open] { display: flex; flex-direction: column; }

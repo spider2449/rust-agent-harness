@@ -1,10 +1,12 @@
 //! The `model` service: one streamed request per call, no agent loop.
 
 use async_trait::async_trait;
-use futures::stream::BoxStream;
-use rah_kernel::ServiceKey;
-use rah_protocol::{ModelEvent, ModelRequest};
+use futures::{StreamExt, stream::BoxStream};
+use rah_kernel::{KernelHandle, ServiceKey};
+use rah_protocol::{ContextItem, ModelEvent, ModelRequest, SessionId};
 use tokio_util::sync::CancellationToken;
+
+use crate::session::{SESSION, SessionError, rebuild_context};
 
 pub const MODEL: ServiceKey<dyn ModelProvider> = ServiceKey::new("model");
 
@@ -69,6 +71,82 @@ pub enum ModelError {
     Rejected(String),
     #[error("model protocol violation: {0}")]
     Protocol(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SideQuestionError {
+    #[error("usage: /btw <question>")]
+    EmptyQuestion,
+    #[error("no session service is mounted")]
+    NoSession,
+    #[error("no model service is mounted")]
+    NoModel,
+    #[error(transparent)]
+    Session(#[from] SessionError),
+    #[error(transparent)]
+    Model(#[from] ModelError),
+}
+
+/// Answers from a snapshot of the session log using a single model request.
+/// The request offers no tools, and only text from the model is returned.
+pub async fn answer_side_question(
+    kernel: &KernelHandle,
+    session: &SessionId,
+    question: &str,
+    cancel: CancellationToken,
+) -> Result<String, SideQuestionError> {
+    let question = question.trim();
+    if question.is_empty() {
+        return Err(SideQuestionError::EmptyQuestion);
+    }
+    let sessions = kernel.get(SESSION).ok_or(SideQuestionError::NoSession)?;
+    let model = kernel.get(MODEL).ok_or(SideQuestionError::NoModel)?;
+    let request_cancel = cancel.child_token();
+    let _cancel_on_drop = request_cancel.clone().drop_guard();
+    let answer = async {
+        let records = sessions.read(session).await?;
+        let mut items = rebuild_context(&records);
+        items.insert(
+            0,
+            ContextItem::System {
+                text: "Answer the side question concisely using the conversation so far. \
+                       If there isn't enough information, say so."
+                    .into(),
+            },
+        );
+        items.push(ContextItem::User {
+            text: question.to_owned(),
+        });
+        let request = ModelRequest {
+            items,
+            ..ModelRequest::default()
+        };
+        let mut stream = model.stream(request, request_cancel).await?;
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            match event? {
+                ModelEvent::TextDelta { text: delta } => text.push_str(&delta),
+                ModelEvent::Completed if text.trim().is_empty() => {
+                    return Err(
+                        ModelError::Protocol("no text answer to the side question".into()).into(),
+                    );
+                }
+                ModelEvent::Completed => return Ok(text),
+                ModelEvent::ToolCall { .. }
+                | ModelEvent::ReasoningStarted
+                | ModelEvent::Usage { .. } => {}
+            }
+        }
+        Err(
+            ModelError::StreamInterrupted("no completion event for the side question".into())
+                .into(),
+        )
+    };
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(ModelError::Cancelled.into()),
+        result = answer => result,
+    }
 }
 
 /// Whether an HTTP status means the provider cannot serve the request now

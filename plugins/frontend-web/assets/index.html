@@ -253,6 +253,19 @@
     <div id="settings-message" class="settings-message" hidden></div>
     <div id="settings-body"></div>
   </dialog>
+  <dialog id="side-question-dialog" class="dialog" aria-labelledby="side-question-title">
+    <div class="dialog-head">
+      <h2 id="side-question-title">Side question</h2>
+      <button id="side-question-close" type="button" class="ghost">Close</button>
+    </div>
+    <form id="side-question-form">
+      <label for="side-question-input">Ask about this conversation</label>
+      <textarea id="side-question-input" rows="3" required autofocus></textarea>
+      <div class="buttons"><button id="side-question-send" type="submit">Ask</button></div>
+    </form>
+    <p id="side-question-status" role="status" hidden></p>
+    <div id="side-question-answer" class="md" tabindex="0" hidden></div>
+  </dialog>
   <dialog id="help-dialog" class="dialog help" aria-labelledby="help-title">
     <div class="dialog-head">
       <h2 id="help-title">Help</h2>

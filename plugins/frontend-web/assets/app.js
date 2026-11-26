@@ -13,6 +13,7 @@ const state = {
   sessions: [],
   current: null,
   runningSession: null,
+  steering: null,
   liveModelStart: null,
   get running() { return this.runningSession !== null; },
   // Preferences kept by the server (`/api/preferences`): display, the
@@ -485,6 +486,7 @@ function editTitle(host, info) {
 }
 
 function closeSession() {
+  $("side-question-dialog").close();
   state.current = null;
   renderTurnControls();
   renderUsage();
@@ -573,6 +575,7 @@ function awaitTitle() {
 
 async function openSession(id) {
   if (state.current !== id) {
+    $("side-question-dialog").close();
     state.liveModelStart = null;
     $("live").replaceChildren();
     $("live").hidden = true;
@@ -731,6 +734,7 @@ function entryNode(record) {
   let images = [];
   switch (entry.kind) {
     case "turn_started":
+    case "user_message":
       node.classList.add("user");
       meta.append(el("span", "message-role", "You"));
       body.textContent = entry.input;
@@ -871,9 +875,17 @@ async function loadTranscript() {
 
 function renderTurnControls() {
   const here = state.running && state.runningSession === state.current;
-  $("send").hidden = here;
-  $("send").disabled = state.running || !state.current;
-  $("send").title = state.running && !here ? "Another session is running on this connection" : "Send";
+  const input = $("input").value.trim();
+  const sideQuestion = /^\/btw(?:\s|$)/.test(input);
+  const steer = here && input && !input.startsWith("/");
+  const pending = state.steering?.session === state.current;
+  const button = $("send");
+  button.hidden = here && !sideQuestion && !steer;
+  button.disabled = !state.current || (!sideQuestion && (pending || (state.running && !steer)));
+  const label = steer ? (pending ? "Guidance pending" : "Steer turn") : "Send";
+  button.textContent = label;
+  button.setAttribute("aria-label", label);
+  button.title = state.running && !here && !sideQuestion ? "Another session is running on this connection" : label;
   $("session-undo").disabled = state.running;
   $("cancel").hidden = !here;
   $("busy").hidden = !here;
@@ -1035,8 +1047,87 @@ function send(message) {
   return false;
 }
 
+function steerTurn(draft, input) {
+  if (state.steering || state.runningSession !== state.current) return;
+  const session = state.current;
+  if (!send({ type: "steer", session, input })) return;
+  state.steering = { session, draft, input };
+  renderTurnControls();
+}
+
+function finishSteering(error) {
+  const steering = state.steering;
+  if (!steering) return;
+  state.steering = null;
+  if (error) {
+    showNotice(`Guidance: ${error}`);
+  } else if (steering.session === state.current) {
+    if ($("input").value === steering.draft) $("input").value = "";
+    if (state.runningSession === steering.session) showLive(`\nYou: ${steering.input}\n`);
+  }
+  renderTurnControls();
+}
+
+let sideQuestionId = 0;
+let pendingSideQuestion = null;
+
+function sideQuestionStatus(message) {
+  const status = $("side-question-status");
+  status.hidden = !message;
+  status.textContent = message;
+}
+
+function finishSideQuestion({ id, answer, error }) {
+  const dialog = $("side-question-dialog");
+  if (!dialog.open || pendingSideQuestion === null || pendingSideQuestion !== id) return;
+  pendingSideQuestion = null;
+  $("side-question-send").disabled = false;
+  const body = $("side-question-answer");
+  body.hidden = !answer;
+  if (answer) {
+    body.replaceChildren(state.prefs.raw_markdown ? el("pre", "", answer) : Markdown.render(answer));
+  }
+  sideQuestionStatus(error || "Answer ready.");
+}
+
+function askSideQuestion() {
+  const question = $("side-question-input").value.trim();
+  if (!question || !state.current || pendingSideQuestion !== null) return;
+  const id = ++sideQuestionId;
+  if (!send({ type: "side_question", id, session: state.current, question })) {
+    sideQuestionStatus(NOT_CONNECTED);
+    return;
+  }
+  pendingSideQuestion = id;
+  $("side-question-send").disabled = true;
+  $("side-question-answer").hidden = true;
+  $("side-question-answer").replaceChildren();
+  sideQuestionStatus("Waiting for the model…");
+}
+
+function openSideQuestion(question = "") {
+  if (!state.current) return;
+  const dialog = $("side-question-dialog");
+  if (dialog.open) return;
+  cancelSideQuestion();
+  $("side-question-input").value = question;
+  $("side-question-send").disabled = false;
+  $("side-question-answer").hidden = true;
+  $("side-question-answer").replaceChildren();
+  sideQuestionStatus("");
+  dialog.showModal();
+  if (question) askSideQuestion();
+}
+
+function cancelSideQuestion() {
+  if (pendingSideQuestion === null) return;
+  const id = pendingSideQuestion;
+  pendingSideQuestion = null;
+  if (state.socket?.readyState === WebSocket.OPEN) send({ type: "cancel_side_question", id });
+}
+
 async function startTurn(input) {
-  if (!input || !state.current || state.running || state.starting) return false;
+  if (!input || !state.current || state.running || state.starting || state.steering) return false;
   const session = state.current;
   state.starting = true;
   try {
@@ -1057,6 +1148,7 @@ async function startTurn(input) {
 // mock model; the others run in the browser. Typing `/` lists them.
 const SLASH_COMMANDS = [
   { name: "/new", usage: "/new", help: "Start a new session" },
+  { name: "/btw", usage: "/btw [question]", help: "Ask a side question using the session history (Ctrl+; or ⌘+;)" },
   { name: "/plugins", usage: "/plugins", help: "Show the Plugins panel" },
   { name: "/skills", usage: "/skills", help: "Open Skills settings" },
   {
@@ -1121,6 +1213,7 @@ function hideSlashMenu() {
 
 function updateSlashMenu() {
   const value = $("input").value;
+  renderTurnControls();
   if (!value.startsWith("/")) slash.plugins = null; // Reload on the next command.
   slash.items = slashItems(value);
   slash.index = Math.min(slash.index, Math.max(slash.items.length - 1, 0));
@@ -1239,6 +1332,9 @@ async function runSlash(input) {
         if (state.running && state.runningSession === state.current) send({ type: "cancel" });
         else showNotice("No turn is running in this session.");
         break;
+      case "/btw":
+        openSideQuestion(input.slice(name.length).trim());
+        break;
       case "/undo":
         await undoLast();
         break;
@@ -1256,13 +1352,20 @@ async function runSlash(input) {
 async function submit(event) {
   event.preventDefault();
   if (state.branching) return;
-  const input = $("input").value.trim();
+  const draft = $("input").value;
+  const input = draft.trim();
   const local = await runSlash(input);
   if (local) {
     if (local !== "keep") $("input").value = "";
+    renderTurnControls();
     return;
   }
-  if (await startTurn(input)) $("input").value = "";
+  if (state.runningSession === state.current && state.current && input && !input.startsWith("/")) {
+    steerTurn(draft, input);
+  } else if (await startTurn(input)) {
+    $("input").value = "";
+    renderTurnControls();
+  }
 }
 
 function addUsage(session, usage) {
@@ -2763,7 +2866,7 @@ function seedActivity(records) {
   for (const record of records) {
     const entry = record.entry;
     const when = `#${record.seq}`;
-    if (entry.kind === "turn_started") logActivity(`▶ ${oneLine(entry.input)}`, "", when);
+    if (entry.kind === "turn_started" || entry.kind === "user_message") logActivity(`▶ ${oneLine(entry.input)}`, "", when);
     else if (entry.kind === "tool_call") toolActivity(entry.name, entry.arguments, when);
     else if (entry.kind === "tool_result") resultActivity(entry.output, entry.effect, when);
     else if (entry.kind === "turn_completed") logActivity("■ turn completed", "good", when);
@@ -2822,6 +2925,8 @@ function connect() {
   socket.addEventListener("message", (message) => {
     const data = JSON.parse(message.data);
     if (data.type === "event") onEvent(data.session, data.event);
+    else if (data.type === "side_question") finishSideQuestion(data);
+    else if (data.type === "steer_result") finishSteering(data.error);
     else if (data.type === "approval_required") {
       showApproval(data);
       if (state.running) setBusyPhase("Waiting for your approval", true);
@@ -2851,6 +2956,8 @@ function connect() {
     }
     $("connection").textContent = "disconnected";
     $("connection").hidden = false;
+    finishSideQuestion({ id: pendingSideQuestion, error: NOT_CONNECTED });
+    finishSteering("connection lost before confirming the message. Check the conversation before sending it again.");
     setRunning(false);
     setTimeout(connect, state.retry);
     state.retry = Math.min(state.retry * 2, 10000);
@@ -3987,6 +4094,29 @@ async function start() {
     return;
   }
   $("composer").addEventListener("submit", submit);
+  $("side-question-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    askSideQuestion();
+  });
+  $("side-question-input").addEventListener("keydown", (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      $("side-question-form").requestSubmit();
+    }
+  });
+  $("side-question-close").addEventListener("click", () => $("side-question-dialog").close());
+  $("side-question-dialog").addEventListener("close", () => {
+    if (!$("side-question-dialog").open) cancelSideQuestion();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.repeat
+      || event.key !== ";" || event.altKey || event.shiftKey || event.ctrlKey === event.metaKey
+      || !state.current || document.querySelector("dialog[open]")) return;
+    event.preventDefault();
+    hideSlashMenu();
+    openSideQuestion();
+  });
   window.addEventListener("focus", restoreComposerFocus);
   $("input").addEventListener("keydown", (event) => {
     // IME confirmation belongs to the editor, including legacy WebView events.

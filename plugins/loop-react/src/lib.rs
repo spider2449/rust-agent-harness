@@ -29,7 +29,10 @@ use std::sync::Arc;
 use futures::channel::mpsc;
 use rah_api::{
     CancellationToken, KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
-    agent_loop::{AgentLoop, LOOP, RunningTurn, RunningTurns, TurnEvent, TurnRequest, TurnStream},
+    agent_loop::{
+        AgentLoop, LOOP, RunningTurn, RunningTurns, SteeringInbox, TurnEvent, TurnRequest,
+        TurnSteering, TurnStream,
+    },
     async_trait,
     hooks::ModelBeforeRequest,
     kernel::Spawner,
@@ -116,6 +119,10 @@ struct ReactLoop {
 
 impl AgentLoop for ReactLoop {
     fn run_turn(&self, request: TurnRequest) -> TurnStream {
+        self.run_steerable_turn(request).0
+    }
+
+    fn run_steerable_turn(&self, request: TurnRequest) -> (TurnStream, Option<TurnSteering>) {
         let (sender, receiver) = mpsc::unbounded();
         // One turn per session: a second one records nothing.
         let running = match self.running.admit(&request.session) {
@@ -126,10 +133,12 @@ impl AgentLoop for ReactLoop {
                     code: AgentErrorCode::InvalidRequest,
                     message: reason.into(),
                 });
-                return Box::pin(receiver);
+                return (Box::pin(receiver), None);
             }
         };
+        let (steering, inbox) = TurnSteering::channel();
         let turn = Turn {
+            steering: inbox,
             origin: request.origin,
             kernel: self.kernel.clone(),
             session: self.session.clone(),
@@ -153,7 +162,7 @@ impl AgentLoop for ReactLoop {
             });
         }
         drop(sender);
-        Box::pin(receiver)
+        (Box::pin(receiver), Some(steering))
     }
 }
 
@@ -189,6 +198,7 @@ enum Ended {
 }
 
 struct Turn {
+    steering: SteeringInbox,
     origin: rah_api::agent_loop::TurnOrigin,
     kernel: KernelHandle,
     session: Arc<dyn SessionLog>,
@@ -202,6 +212,23 @@ struct Turn {
 }
 
 impl Turn {
+    async fn record_steering(
+        &self,
+        items: &mut Vec<ContextItem>,
+        completing: bool,
+    ) -> Result<bool, Failure> {
+        self.steering
+            .record_pending(
+                self.session.as_ref(),
+                &self.sid,
+                &self.id,
+                items,
+                completing,
+            )
+            .await
+            .map_err(|error| failure(AgentErrorCode::Session, error.to_string()))
+    }
+
     fn emit(&self, event: AgentEvent) {
         self.kernel.emit(&TurnEvent {
             event: event.clone(),
@@ -230,6 +257,7 @@ impl Turn {
         {
             Ok(opened) => opened,
             Err(message) => {
+                self.steering.close();
                 drop(running);
                 self.emit(AgentEvent::Failed {
                     session_id: self.sid.clone(),
@@ -292,6 +320,7 @@ impl Turn {
                 }
             }
         };
+        self.steering.close();
         drop(running);
         self.emit(terminal);
     }
@@ -321,6 +350,7 @@ impl Turn {
             if self.cancelled() {
                 return Ok(Ended::Cancelled);
             }
+            self.record_steering(&mut items, false).await?;
             let (text, calls) = match self.model_round(&items, invoker.definitions()).await? {
                 Some(round) => round,
                 None => return Ok(Ended::Cancelled),
@@ -335,11 +365,17 @@ impl Turn {
                 add_round(&mut answer, &text);
             }
             if calls.is_empty() {
+                if self.record_steering(&mut items, true).await? {
+                    continue;
+                }
                 return Ok(Ended::Completed(answer));
             }
             for (call_id, name, arguments) in calls {
                 if self.cancelled() {
                     return Ok(Ended::Cancelled);
+                }
+                if self.steering.has_pending() {
+                    break;
                 }
                 self.tool_round(&invoker, &mut items, call_id, name, arguments)
                     .await?;
@@ -367,26 +403,36 @@ impl Turn {
                 self.max_rounds
             ),
         });
-        let Some((text, _)) = self.model_round(&items, Vec::new()).await? else {
-            return Ok(Ended::Cancelled);
-        };
-        // Tool calls a provider sends anyway are not run.
-        if text.is_empty() {
-            return Err(failure(
-                AgentErrorCode::Model,
-                format!(
-                    "the turn exceeded {} model rounds and the model gave no answer",
-                    self.max_rounds
-                ),
-            ));
+        loop {
+            self.record_steering(&mut items, false).await?;
+            let Some((text, _)) = self.model_round(&items, Vec::new()).await? else {
+                return Ok(Ended::Cancelled);
+            };
+            // Tool calls a provider sends anyway are not run.
+            if !text.is_empty() {
+                self.append(SessionEntry::AssistantMessage {
+                    turn: self.id.clone(),
+                    text: text.clone(),
+                })
+                .await?;
+                items.push(ContextItem::Assistant { text: text.clone() });
+                add_round(&mut answer, &text);
+            }
+            if self.record_steering(&mut items, true).await? {
+                continue;
+            }
+            return if text.is_empty() {
+                Err(failure(
+                    AgentErrorCode::Model,
+                    format!(
+                        "the turn exceeded {} model rounds and the model gave no answer",
+                        self.max_rounds
+                    ),
+                ))
+            } else {
+                Ok(Ended::Completed(answer))
+            };
         }
-        self.append(SessionEntry::AssistantMessage {
-            turn: self.id.clone(),
-            text: text.clone(),
-        })
-        .await?;
-        add_round(&mut answer, &text);
-        Ok(Ended::Completed(answer))
     }
 
     /// One model request offering `tools`. `None` means the turn was

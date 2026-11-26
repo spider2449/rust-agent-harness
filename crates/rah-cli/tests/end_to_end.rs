@@ -271,6 +271,54 @@ async fn repl_runs_turns_and_commands() {
     assert!(!text.contains("unknown command /call"), "{text}");
 }
 
+#[tokio::test]
+async fn repl_side_questions_use_history_without_tools_or_session_records() {
+    let dir = TempDir::new("repl-side-question");
+    let kernel = kernel(&headless(&dir)).await;
+    let handle = kernel.handle();
+    let session = new_session(&handle).await;
+    let input: &[u8] =
+        b"/notool main question\n/btw\n/btw context check\n/btw /call echo {}\n/notool after\n";
+    let mut output = Vec::new();
+    let code = run_repl(
+        &handle,
+        input,
+        &mut output,
+        ReplOptions {
+            session: Some(session.to_string()),
+            ..ReplOptions::default()
+        },
+        None,
+        RunningTurn::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 0);
+    let output = String::from_utf8(output).unwrap();
+    for expected in [
+        "usage: /btw <question>",
+        "[btw] [model-mock] you said: context check (3 earlier items)",
+        "[btw] [model-mock] tool `echo` is not offered",
+        "[model-mock] you said: after (4 earlier items)",
+    ] {
+        assert!(
+            output.contains(expected),
+            "missing {expected:?} in {output}"
+        );
+    }
+    assert_eq!(
+        entries(&handle, &session).await,
+        [
+            "turn-started",
+            "assistant",
+            "turn-completed",
+            "turn-started",
+            "assistant",
+            "turn-completed",
+        ]
+    );
+}
+
 /// Answers `tool.approval` by forwarding each request, like `frontend-cli`.
 struct Approver {
     manifest: PluginManifest,

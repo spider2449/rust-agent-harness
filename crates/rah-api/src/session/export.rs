@@ -105,7 +105,7 @@ pub fn markdown(info: &SessionInfo, records: &[SessionRecord]) -> String {
     out.push_str(".\n");
     for record in records {
         match &record.entry {
-            SessionEntry::TurnStarted { input, .. } => {
+            SessionEntry::TurnStarted { input, .. } | SessionEntry::UserMessage { input, .. } => {
                 out.push_str(&format!("\n## You\n\n{input}\n"));
             }
             SessionEntry::AssistantMessage { text, .. } => {
@@ -174,7 +174,7 @@ pub fn trace(records: &[SessionRecord], limits: TraceLimits) -> String {
     };
     for record in records {
         match &record.entry {
-            SessionEntry::TurnStarted { input, .. } => {
+            SessionEntry::TurnStarted { input, .. } | SessionEntry::UserMessage { input, .. } => {
                 close(&mut lines, &mut open);
                 lines.push(format!("[USER] {}", clip(input, limits.text)));
             }

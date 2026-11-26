@@ -161,7 +161,7 @@ pub fn rebuild_context(records: &[SessionRecord]) -> Vec<ContextItem> {
                     output: output.clone(),
                 });
             }
-            SessionEntry::TurnStarted { input, .. } => {
+            SessionEntry::TurnStarted { input, .. } | SessionEntry::UserMessage { input, .. } => {
                 close(&mut items, &mut open);
                 items.push(ContextItem::User {
                     text: input.clone(),

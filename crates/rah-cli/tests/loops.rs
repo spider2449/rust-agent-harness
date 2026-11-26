@@ -256,7 +256,7 @@ impl rah_api::Plugin for GateTool {
 /// `ToolStarted` arrives while the tool runs, not after it returned: the
 /// gate opens only once the event was seen.
 #[tokio::test]
-async fn both_loops_pin_the_workspace_while_a_tool_runs() {
+async fn both_loops_pin_the_workspace_and_accept_steering_while_a_tool_runs() {
     use futures::StreamExt;
     use rah_api::agent_loop::{LOOP, TurnRequest};
 
@@ -281,21 +281,29 @@ async fn both_loops_pin_the_workspace_while_a_tool_runs() {
             .unwrap();
         let handle = kernel.handle();
         let session = new_session(&handle).await;
-        let mut events = handle.get(LOOP).unwrap().run_turn(TurnRequest {
+        let (mut events, steering) = handle.get(LOOP).unwrap().run_steerable_turn(TurnRequest {
             origin: rah_api::agent_loop::TurnOrigin::User,
             session: session.clone(),
             input: "/call gate {}".into(),
             cancel: rah_api::CancellationToken::new(),
         });
+        let steering = steering.unwrap();
         let other = dir.0.join("other");
         std::fs::create_dir(&other).unwrap();
         let admin = handle.get(ADMIN).unwrap();
         let mut seen = Vec::new();
+        let mut receipt = None;
         let run = async {
             while let Some(event) = events.next().await {
                 match &event {
                     AgentEvent::ToolStarted { .. } => {
                         assert!(admin.set_workspace(&other).await.is_err());
+                        let mut pending = steering.send("/notool revised direction").unwrap();
+                        assert_eq!(
+                            pending.try_recv(),
+                            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                        );
+                        receipt = Some(pending);
                         open.notify_one();
                     }
                     AgentEvent::ToolFinished { output, .. } => {
@@ -312,6 +320,26 @@ async fn both_loops_pin_the_workspace_while_a_tool_runs() {
         let kinds = kinds(&seen);
         assert!(kinds.contains(&"tool-started"), "{loop_kind}: {kinds:?}");
         assert_eq!(kinds.last(), Some(&"completed"), "{loop_kind}: {kinds:?}");
+        receipt.unwrap().await.unwrap();
+        assert!(
+            answer(&seen).contains("you said: revised direction"),
+            "{loop_kind}"
+        );
+        let records = handle.get(SESSION).unwrap().read(&session).await.unwrap();
+        let SessionEntry::TurnStarted { turn: turn_id, .. } = &records[0].entry else {
+            panic!("no turn start")
+        };
+        let guidance = records.iter().position(|record| matches!(&record.entry, SessionEntry::UserMessage { turn, input } if turn == turn_id && input == "/notool revised direction")).unwrap();
+        assert!(matches!(
+            records[guidance - 1].entry,
+            SessionEntry::ToolResult { .. }
+        ));
+        let context = rah_api::session::rebuild_context(&records);
+        assert!(context.iter().any(|item| matches!(item, rah_protocol::ContextItem::User { text } if text == "/notool revised direction")));
+        assert!(matches!(
+            steering.send("too late"),
+            Err(rah_api::agent_loop::SteeringError::Closed)
+        ));
         admin.set_workspace(&other).await.unwrap();
         let before = entries(&handle, &session).await;
         let refused = turn(&handle, &session, "/call fs.read {}").await;
@@ -325,6 +353,90 @@ async fn both_loops_pin_the_workspace_while_a_tool_runs() {
             Some(AgentEvent::Completed { .. })
         ));
     }
+}
+
+/// Holds the first request so guidance arrives before a text-only reply.
+struct RequestGate {
+    manifest: rah_api::PluginManifest,
+    ready: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[rah_api::async_trait]
+impl rah_api::Plugin for RequestGate {
+    fn manifest(&self) -> &rah_api::PluginManifest {
+        &self.manifest
+    }
+
+    async fn apply(&self, scope: &mut rah_api::Scope) -> Result<(), rah_api::PluginError> {
+        let first = std::sync::Mutex::new(Some((self.ready.clone(), self.release.clone())));
+        scope.hook_waterfall::<rah_api::hooks::ModelBeforeRequest, _, _>(-100, move |request| {
+            let first = first.lock().unwrap().take();
+            async move {
+                if let Some((ready, release)) = first {
+                    ready.notify_one();
+                    release.notified().await;
+                }
+                request
+            }
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn steering_continues_a_turn_even_when_the_current_reply_has_no_tools() {
+    use futures::StreamExt;
+    use rah_api::agent_loop::{LOOP, TurnOrigin, TurnRequest};
+
+    let dir = TempDir::new("steer-text-only");
+    let kernel = kernel(&headless(&dir)).await;
+    let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    kernel
+        .mount(
+            std::sync::Arc::new(RequestGate {
+                manifest: rah_api::PluginManifest::new("request-gate", "1"),
+                ready: ready.clone(),
+                release: release.clone(),
+            }),
+            rah_api::MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let handle = kernel.handle();
+    let session = new_session(&handle).await;
+    let (events, steering) = handle.get(LOOP).unwrap().run_steerable_turn(TurnRequest {
+        origin: TurnOrigin::User,
+        session: session.clone(),
+        input: "/notool first".into(),
+        cancel: rah_api::CancellationToken::new(),
+    });
+    let steering = steering.unwrap();
+    let events: Vec<AgentEvent> = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        ready.notified().await;
+        let receipt = steering.send("/notool second").unwrap();
+        release.notify_one();
+        receipt.await.unwrap();
+        events.collect().await
+    })
+    .await
+    .unwrap();
+    let text = answer(&events);
+    assert!(
+        text.contains("you said: first") && text.contains("you said: second"),
+        "{text}"
+    );
+    assert_eq!(
+        entries(&handle, &session).await,
+        [
+            "turn-started",
+            "assistant",
+            "user-message",
+            "assistant",
+            "turn-completed"
+        ]
+    );
 }
 
 /// Inject failures on either side of the durable TurnStarted write.

@@ -190,6 +190,9 @@ refused; use `--permissions`, or pipe from Bash.
 ## The terminal REPL
 
 Type text to run a turn; Ctrl-C cancels it (with no turn running, it exits).
+In an interactive terminal, type a message and press `Enter` while a turn is
+running to steer it. At a tool approval prompt, enter `/steer <message>` to
+add guidance and keep the approval open for your decision.
 `/` or `/help` lists the commands: `/new`, `/sessions`, `/resume <id>`,
 `/fork <seq>`, `/rename [title]`, `/history`, `/changes` and `/undo` (take
 back the session's newest file change while the files are still what it left,
@@ -197,6 +200,10 @@ back the session's newest file change while the files are still what it left,
 `/stop`, `/start` and `/restart <plugin>`. With the mock model,
 `/call <tool> <json>` requests a tool and `/notool <text>` answers without
 one, for example `/call repo.status {}`.
+
+Between turns, use `/btw <question>` to ask about the current session.
+The active model answers from the recorded conversation and tool results.
+Side questions have no tool access, and the exchange stays out of the session log.
 
 ## The Web UI
 
@@ -211,6 +218,17 @@ free port, and says so.
   `~/.rah/sessions/deleted/`; `scripts\sessions.ps1` restores them). The last
   answer can be regenerated and an earlier message edited, both in a new
   branch.
+- **Side questions** open with `Ctrl+;` (`Cmd+;` on macOS) or `/btw`. Use
+  `/btw <question>` to ask immediately. The side question can run while the
+  main turn is working and uses the session records available at the time.
+  It has no tool access and stays out of the session log. The shortcut
+  preserves your draft in the main composer. Press `Esc` or **Close** to
+  dismiss it.
+- **Steer the current turn** by typing in the main composer and pressing
+  `Enter` or clicking **Steer turn** while the agent is working. The message
+  appears in the conversation and guides the next model request in the same
+  turn. A tool call already in progress can finish, and a tool awaiting
+  approval still requires a decision.
 - **Approvals** appear in the conversation. **Allow** approves the displayed
   call once. When offered, **Allow for this session** trusts the tool for the
   rest of that session. For program calls, see

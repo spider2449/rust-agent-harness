@@ -200,6 +200,7 @@ pub async fn entries(kernel: &KernelHandle, session: &SessionId) -> Vec<&'static
         .iter()
         .map(|record| match record.entry {
             SessionEntry::TurnStarted { .. } => "turn-started",
+            SessionEntry::UserMessage { .. } => "user-message",
             SessionEntry::AssistantMessage { .. } => "assistant",
             SessionEntry::ToolCall { .. } => "tool-call",
             SessionEntry::ToolResult { .. } => "tool-result",

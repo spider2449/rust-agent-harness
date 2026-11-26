@@ -7,8 +7,8 @@ use std::{
 
 use futures::stream::BoxStream;
 use rah_kernel::{KernelHandle, ServiceKey};
-use rah_protocol::{AgentEvent, SessionId, SessionRecord};
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use rah_protocol::{AgentEvent, ContextItem, RequestId, SessionEntry, SessionId, SessionRecord};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, oneshot};
 use tokio_util::sync::CancellationToken;
 
 pub const LOOP: ServiceKey<dyn AgentLoop> = ServiceKey::new("loop");
@@ -98,6 +98,121 @@ pub trait AgentLoop: Send + Sync {
     /// A session runs one turn at a time (see [`RunningTurns`]): a second
     /// one ends at once with `Failed` and records nothing.
     fn run_turn(&self, request: TurnRequest) -> TurnStream;
+
+    /// Starts a turn that may accept further user input. Loops that only
+    /// support an initial prompt leave the steering handle absent.
+    fn run_steerable_turn(&self, request: TurnRequest) -> (TurnStream, Option<TurnSteering>) {
+        (self.run_turn(request), None)
+    }
+}
+
+struct SteeringInput {
+    input: String,
+    recorded: oneshot::Sender<()>,
+}
+
+type SteeringQueue = Arc<Mutex<Option<Vec<SteeringInput>>>>;
+
+/// A handle to the input queue of exactly one running turn.
+#[derive(Clone)]
+pub struct TurnSteering(SteeringQueue);
+
+/// The loop's half of the steering handle. Dropping it rejects pending input.
+pub struct SteeringInbox(SteeringQueue);
+
+#[derive(Debug, thiserror::Error)]
+pub enum SteeringError {
+    #[error("the turn has stopped accepting input")]
+    Closed,
+    #[error("guidance must contain between 1 and 32768 bytes of text")]
+    Invalid,
+    #[error("the turn has too much guidance waiting to be applied")]
+    Full,
+}
+
+impl TurnSteering {
+    pub fn channel() -> (Self, SteeringInbox) {
+        let queue = Arc::new(Mutex::new(Some(Vec::new())));
+        (Self(queue.clone()), SteeringInbox(queue))
+    }
+
+    /// The receipt succeeds once the guidance has been recorded in the turn.
+    pub fn send(&self, input: &str) -> Result<oneshot::Receiver<()>, SteeringError> {
+        let input = input.trim();
+        if input.is_empty() || input.len() > 32_768 {
+            return Err(SteeringError::Invalid);
+        }
+        let mut queue = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let queue = queue.as_mut().ok_or(SteeringError::Closed)?;
+        if queue.len() >= 8 {
+            return Err(SteeringError::Full);
+        }
+        let (recorded, receipt) = oneshot::channel();
+        queue.push(SteeringInput {
+            input: input.to_owned(),
+            recorded,
+        });
+        Ok(receipt)
+    }
+}
+
+impl SteeringInbox {
+    pub fn close(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|queue| !queue.is_empty())
+    }
+
+    /// Records queued messages at a model boundary, after any in-flight tool
+    /// result. When completing a turn, atomically close the empty queue so a
+    /// concurrent submission is either consumed or rejected.
+    pub async fn record_pending(
+        &self,
+        sessions: &dyn crate::session::SessionLog,
+        session: &SessionId,
+        turn: &RequestId,
+        items: &mut Vec<ContextItem>,
+        completing: bool,
+    ) -> Result<bool, crate::session::SessionError> {
+        let messages = {
+            let mut queue = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            match queue.as_mut() {
+                Some(messages) if !messages.is_empty() => std::mem::take(messages),
+                _ => {
+                    if completing {
+                        *queue = None;
+                    }
+                    return Ok(false);
+                }
+            }
+        };
+        for SteeringInput { input, recorded } in messages {
+            sessions
+                .append(
+                    session,
+                    SessionEntry::UserMessage {
+                        turn: turn.clone(),
+                        input: input.clone(),
+                    },
+                )
+                .await?;
+            items.push(ContextItem::User { text: input });
+            let _ = recorded.send(());
+        }
+        Ok(true)
+    }
+}
+
+impl Drop for SteeringInbox {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 /// What a turn fails with when its session already runs one.

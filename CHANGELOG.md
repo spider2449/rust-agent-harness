@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.45.44 (2026-11-26)
+
+- Add `/btw` side questions using session history, with a keyboard shortcut
+  on Web and Desktop. Side questions have no tool access and stay out of the
+  session log.
+- Send guidance during a running turn from the main composer or interactive
+  terminal. The guidance is saved in the same turn and used at the next
+  model request. Pending tool approvals still require a separate decision.
+- Retry interrupted llama.cpp model streams before executing tool requests.
+- Expand the Maya tools to support Maya 2023 and later, and prefer running
+  instances when discovering Maya executable paths.
+
 ## v0.45.43 (2026-11-25)
 
 - Add the opt-in `tools-json-edit` plugin for a host-configured JSON integer.
