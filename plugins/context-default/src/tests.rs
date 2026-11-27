@@ -163,6 +163,39 @@ fn images_are_sent_in_the_current_turn_only_and_count_a_fixed_size() {
 }
 
 #[test]
+fn guidance_keeps_the_current_turn_and_its_image_together() {
+    let items = vec![
+        user("old"),
+        assistant("old answer"),
+        user("inspect the screenshot"),
+        call("1"),
+        screenshot("1"),
+        ContextItem::UserGuidance {
+            text: "focus on the lower corner".into(),
+        },
+    ];
+    let window = Window {
+        max_items: 3,
+        max_chars: 100_000,
+    };
+    let current = shape(request(items.clone()), None, None, window).items;
+    assert_eq!(&current[1..], &items[2..]);
+
+    let mut next_turn = items;
+    next_turn.push(user("next turn"));
+    let history = shape(request(next_turn), None, None, WIDE).items;
+    let ContextItem::ToolResult { output, .. } = &history[4] else {
+        panic!("expected tool result");
+    };
+    assert!(
+        output
+            .content
+            .iter()
+            .all(|item| matches!(item, ToolContent::Text(_)))
+    );
+}
+
+#[test]
 fn system_prompt_and_notes_come_first() {
     let items = vec![
         ContextItem::System {

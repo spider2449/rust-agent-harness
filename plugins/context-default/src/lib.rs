@@ -286,6 +286,7 @@ fn size(item: &ContextItem) -> usize {
     match item {
         ContextItem::System { text }
         | ContextItem::User { text }
+        | ContextItem::UserGuidance { text }
         | ContextItem::Assistant { text } => text.len(),
         ContextItem::ToolCall { arguments, .. } => arguments.to_string().len(),
         ContextItem::ToolResult { output, .. } => output

@@ -72,8 +72,9 @@ pub trait SessionLog: Send + Sync {
     }
 
     /// Removes the session from the list. Refused while forks of it exist,
-    /// since they read its records. Providers should keep the data
-    /// recoverable rather than destroy it.
+    /// since they read its records. Providers that share the host's turn
+    /// admission should reserve the session through the deletion. Providers
+    /// should keep the data recoverable rather than destroy it.
     async fn delete(&self, session: &SessionId) -> Result<(), SessionError> {
         let _ = session;
         Err(SessionError::Unsupported("delete"))
@@ -93,6 +94,8 @@ pub struct SessionAppended {
 pub enum SessionError {
     #[error("session `{0}` does not exist")]
     NotFound(SessionId),
+    #[error("session `{0}` is in use; wait for the current operation before deleting it")]
+    Busy(SessionId),
     #[error("cannot fork session `{session}` at {at}; it has {last} records")]
     InvalidFork {
         session: SessionId,
@@ -161,9 +164,15 @@ pub fn rebuild_context(records: &[SessionRecord]) -> Vec<ContextItem> {
                     output: output.clone(),
                 });
             }
-            SessionEntry::TurnStarted { input, .. } | SessionEntry::UserMessage { input, .. } => {
+            SessionEntry::TurnStarted { input, .. } => {
                 close(&mut items, &mut open);
                 items.push(ContextItem::User {
+                    text: input.clone(),
+                });
+            }
+            SessionEntry::UserMessage { input, .. } => {
+                close(&mut items, &mut open);
+                items.push(ContextItem::UserGuidance {
                     text: input.clone(),
                 });
             }

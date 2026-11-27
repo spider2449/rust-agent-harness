@@ -12,16 +12,22 @@ use std::sync::{
 use common::{TempDir, entries, headless, kernel, new_session, reply, turn};
 use rah_api::{
     CancellationToken, Plugin, PluginError, PluginManifest, Scope, async_trait,
+    hooks::{ModelBeforeRequest, ModelOverflow},
     kernel::MountOptions,
-    model::{MODEL, ModelError, ModelProvider, ModelStream},
+    model::{MODEL, ModelError, ModelProvider, ModelStream, answer_side_question},
+    session::SESSION,
 };
-use rah_protocol::{AgentEvent, ContextItem, ModelEvent, ModelRequest};
+use rah_protocol::{
+    AgentEvent, ContextItem, ModelEvent, ModelRequest, PermissionLevel, RequestId, SessionEntry,
+    ToolDefinition, ToolName,
+};
 use serde_json::json;
 
 /// A model whose window holds `window` characters of conversation.
 struct SmallWindow {
     window: usize,
     sizes: Mutex<Vec<usize>>,
+    side_history_counts: Mutex<Vec<usize>>,
     overflows: AtomicU32,
 }
 
@@ -32,6 +38,7 @@ fn chars(request: &ModelRequest) -> usize {
         .map(|item| match item {
             ContextItem::System { text }
             | ContextItem::User { text }
+            | ContextItem::UserGuidance { text }
             | ContextItem::Assistant { text } => text.len(),
             _ => 0,
         })
@@ -45,6 +52,13 @@ impl ModelProvider for SmallWindow {
         request: ModelRequest,
         _cancel: CancellationToken,
     ) -> Result<ModelStream, ModelError> {
+        if request.items.iter().any(|item| matches!(item, ContextItem::System { text } if text.starts_with("Answer the side question"))) {
+            assert!(request.tools.is_empty());
+            let history_count = request.items.iter().filter(
+                |item| matches!(item, ContextItem::User { text } if text.starts_with('x'))
+            ).count();
+            self.side_history_counts.lock().unwrap().push(history_count);
+        }
         let size = chars(&request);
         self.sizes.lock().unwrap().push(size);
         if size > self.window {
@@ -88,6 +102,7 @@ async fn setup(name: &str, with_compact: bool) -> (rah_api::Kernel, TempDir, Arc
     let model = Arc::new(SmallWindow {
         window: 4000,
         sizes: Mutex::new(Vec::new()),
+        side_history_counts: Mutex::new(Vec::new()),
         overflows: AtomicU32::new(0),
     });
     kernel
@@ -162,4 +177,88 @@ async fn without_compaction_the_overflow_ends_the_turn_with_a_clear_error() {
         other => panic!("expected a failure, got {other:?}"),
     }
     assert_eq!(model.overflows.load(Ordering::SeqCst), 1);
+}
+
+struct AddTool(PluginManifest);
+
+#[async_trait]
+impl Plugin for AddTool {
+    fn manifest(&self) -> &PluginManifest {
+        &self.0
+    }
+
+    async fn apply(&self, scope: &mut Scope) -> Result<(), PluginError> {
+        async fn add_tool(mut request: ModelRequest) -> ModelRequest {
+            request.tools.push(ToolDefinition {
+                name: ToolName::new("echo"),
+                description: "test".into(),
+                input_schema: json!({"type": "object"}),
+                permission: PermissionLevel::None,
+            });
+            request
+        }
+        scope.hook_waterfall::<ModelBeforeRequest, _, _>(100, add_tool);
+        scope.hook_waterfall::<ModelOverflow, _, _>(100, add_tool);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn side_questions_use_the_history_window_and_recover_from_model_overflow_without_tools() {
+    let (kernel, _dir, model) = setup("side-question-overflow", true).await;
+    kernel
+        .update_config(
+            &"context-default".into(),
+            json!({ "system": "", "environment": false, "max_items": 5 }),
+        )
+        .await
+        .unwrap();
+    kernel
+        .update_config(
+            &"context-compact".into(),
+            json!({ "trigger_chars": 1000000, "keep_chars": 1000, "chunk_chars": 2500 }),
+        )
+        .await
+        .unwrap();
+    kernel
+        .mount(
+            Arc::new(AddTool(PluginManifest::new("test-add-tool", "1"))),
+            MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let handle = kernel.handle();
+    let session = new_session(&handle).await;
+    let log = handle.get(SESSION).unwrap();
+    for _ in 0..3 {
+        let turn = RequestId::new();
+        log.append(
+            &session,
+            SessionEntry::TurnStarted {
+                turn: turn.clone(),
+                input: "x".repeat(2100),
+            },
+        )
+        .await
+        .unwrap();
+        log.append(
+            &session,
+            SessionEntry::AssistantMessage {
+                turn,
+                text: "answer".into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let before = log.read(&session).await.unwrap();
+    assert_eq!(
+        answer_side_question(&handle, &session, "recap", CancellationToken::new())
+            .await
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(*model.side_history_counts.lock().unwrap(), [2, 0]);
+    assert_eq!(model.overflows.load(Ordering::SeqCst), 1);
+    assert_eq!(log.read(&session).await.unwrap(), before);
 }

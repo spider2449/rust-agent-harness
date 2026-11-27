@@ -1,74 +1,89 @@
-//! ADR 0036 dependency rules: plugins depend only on `rah-api` and
-//! `rah-protocol`; `rah-api` depends only on `rah-kernel` and `rah-protocol`.
+//! ADR 0036 dependency rules, checked against Cargo's package identities.
 
-use std::{fs, path::Path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-fn rah_dependencies(manifest: &Path) -> Vec<String> {
-    let text = fs::read_to_string(manifest).expect("manifest should be readable");
-    text.lines()
-        .map(str::trim)
-        .filter_map(|line| {
-            let name = line.split(['=', ' ', '.']).next()?;
-            name.starts_with("rah-").then(|| name.to_owned())
-        })
-        .collect()
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Metadata {
+    packages: Vec<Package>,
 }
 
-fn workspace() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+#[derive(Deserialize)]
+struct Package {
+    name: String,
+    manifest_path: PathBuf,
+    dependencies: Vec<Dependency>,
+}
+
+#[derive(Deserialize)]
+struct Dependency {
+    // Cargo reports the package name here, even when the manifest uses an alias.
+    name: String,
+}
+
+#[test]
+fn workspace_dependencies_follow_the_plugin_kernel_layers() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("rah-cli lives in <workspace>/crates/rah-cli")
-}
-
-#[test]
-fn plugins_depend_only_on_the_api_and_protocol() {
-    let mut checked = 0;
-    for entry in fs::read_dir(workspace().join("plugins")).unwrap() {
-        let manifest = entry.unwrap().path().join("Cargo.toml");
-        if !manifest.exists() {
-            continue;
+        .expect("rah-cli lives in <workspace>/crates/rah-cli");
+    let output = Command::new(env!("CARGO"))
+        .current_dir(workspace)
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--locked",
+            "--offline",
+        ])
+        .output()
+        .expect("run cargo metadata");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: Metadata = serde_json::from_slice(&output.stdout).expect("Cargo metadata");
+    let members: HashSet<_> = metadata.packages.iter().map(|p| p.name.as_str()).collect();
+    let mut checked = HashSet::new();
+    let mut plugins = 0;
+    for package in &metadata.packages {
+        let allowed: &[&str] = match package.name.as_str() {
+            "rah-kernel" | "rah-protocol" => &[],
+            "rah-api" => &["rah-kernel", "rah-protocol"],
+            "rah-plugin-host-process" | "rah-plugin-host-wasm" => &["rah-api", "rah-protocol"],
+            _ if package.manifest_path.starts_with(workspace.join("plugins")) => {
+                plugins += 1;
+                &["rah-api", "rah-protocol"]
+            }
+            _ => continue,
+        };
+        checked.insert(package.name.as_str());
+        for dependency in &package.dependencies {
+            let name = dependency.name.as_str();
+            if members.contains(name) || name.starts_with("rah-") {
+                assert!(
+                    allowed.contains(&name),
+                    "{} depends on {name}",
+                    package.name
+                );
+            }
         }
-        for dependency in rah_dependencies(&manifest) {
-            assert!(
-                ["rah-api", "rah-protocol"].contains(&dependency.as_str()),
-                "{} depends on {dependency}",
-                manifest.display()
-            );
-        }
-        checked += 1;
     }
-    assert!(checked >= 5);
-}
-
-#[test]
-fn the_process_host_depends_only_on_the_api_and_protocol() {
-    let manifest = workspace().join("crates/rah-plugin-host-process/Cargo.toml");
-    for dependency in rah_dependencies(&manifest) {
-        assert!(
-            ["rah-api", "rah-protocol"].contains(&dependency.as_str()),
-            "rah-plugin-host-process depends on {dependency}"
-        );
-    }
-}
-
-#[test]
-fn the_wasm_host_depends_only_on_the_api_and_protocol() {
-    let manifest = workspace().join("crates/rah-plugin-host-wasm/Cargo.toml");
-    for dependency in rah_dependencies(&manifest) {
-        assert!(
-            ["rah-api", "rah-protocol"].contains(&dependency.as_str()),
-            "rah-plugin-host-wasm depends on {dependency}"
-        );
-    }
-}
-
-#[test]
-fn api_depends_only_on_kernel_and_protocol() {
-    for dependency in rah_dependencies(&workspace().join("crates/rah-api/Cargo.toml")) {
-        assert!(
-            ["rah-kernel", "rah-protocol"].contains(&dependency.as_str()),
-            "rah-api depends on {dependency}"
-        );
+    assert!(plugins >= 5, "Cargo metadata must include the plugins");
+    for name in [
+        "rah-kernel",
+        "rah-protocol",
+        "rah-api",
+        "rah-plugin-host-process",
+        "rah-plugin-host-wasm",
+    ] {
+        assert!(checked.contains(name), "Cargo metadata must include {name}");
     }
 }

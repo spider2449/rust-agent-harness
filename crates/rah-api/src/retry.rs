@@ -250,7 +250,16 @@ where
             (&error, kernel, shrunk, opened)
         {
             shrunk = true;
-            let smaller = kernel.waterfall::<ModelOverflow>(request.clone()).await;
+            let smaller = kernel
+                .waterfall::<ModelOverflow>(request.clone())
+                .await
+                .map(|mut smaller| {
+                    // A smaller request stays tool-free if the original was.
+                    if request.tools.is_empty() {
+                        smaller.tools.clear();
+                    }
+                    smaller
+                });
             if let Ok(smaller) = smaller
                 && smaller != request
             {

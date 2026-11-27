@@ -1,12 +1,17 @@
 //! The `model` service: one streamed request per call, no agent loop.
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream::BoxStream};
-use rah_kernel::{KernelHandle, ServiceKey};
-use rah_protocol::{ContextItem, ModelEvent, ModelRequest, SessionId};
+use futures::stream::BoxStream;
+use rah_kernel::{HookError, KernelHandle, ServiceKey};
+use rah_protocol::{ContextItem, ModelEvent, ModelRequest, ModelRequestId, SessionId};
 use tokio_util::sync::CancellationToken;
 
-use crate::session::{SESSION, SessionError, rebuild_context};
+use crate::{
+    agent_loop::{OpenTurnError, open_turn_history},
+    hooks::ModelBeforeRequest,
+    retry::{self, RetryPolicy},
+    session::{SESSION, SessionError, rebuild_context},
+};
 
 pub const MODEL: ServiceKey<dyn ModelProvider> = ServiceKey::new("model");
 
@@ -84,11 +89,15 @@ pub enum SideQuestionError {
     #[error(transparent)]
     Session(#[from] SessionError),
     #[error(transparent)]
+    History(OpenTurnError),
+    #[error(transparent)]
+    Hook(#[from] HookError),
+    #[error(transparent)]
     Model(#[from] ModelError),
 }
 
-/// Answers from a snapshot of the session log using a single model request.
-/// The request offers no tools, and only text from the model is returned.
+/// Answers from a session snapshot with the configured context hooks and
+/// overflow recovery. The request offers no tools and returns only text.
 pub async fn answer_side_question(
     kernel: &KernelHandle,
     session: &SessionId,
@@ -104,8 +113,13 @@ pub async fn answer_side_question(
     let request_cancel = cancel.child_token();
     let _cancel_on_drop = request_cancel.clone().drop_guard();
     let answer = async {
-        let records = sessions.read(session).await?;
-        let mut items = rebuild_context(&records);
+        let history = open_turn_history(kernel, sessions.as_ref(), session)
+            .await
+            .map_err(|error| match error {
+                OpenTurnError::Session(error) => SideQuestionError::Session(error),
+                error => SideQuestionError::History(error),
+            })?;
+        let mut items = rebuild_context(&history.records);
         items.insert(
             0,
             ContextItem::System {
@@ -121,26 +135,23 @@ pub async fn answer_side_question(
             items,
             ..ModelRequest::default()
         };
-        let mut stream = model.stream(request, request_cancel).await?;
-        let mut text = String::new();
-        while let Some(event) = stream.next().await {
-            match event? {
-                ModelEvent::TextDelta { text: delta } => text.push_str(&delta),
-                ModelEvent::Completed if text.trim().is_empty() => {
-                    return Err(
-                        ModelError::Protocol("no text answer to the side question".into()).into(),
-                    );
-                }
-                ModelEvent::Completed => return Ok(text),
-                ModelEvent::ToolCall { .. }
-                | ModelEvent::ReasoningStarted
-                | ModelEvent::Usage { .. } => {}
-            }
-        }
-        Err(
-            ModelError::StreamInterrupted("no completion event for the side question".into())
-                .into(),
+        let mut request = kernel.waterfall::<ModelBeforeRequest>(request).await?;
+        request.tools.clear();
+        let policy = RetryPolicy::new(0, std::time::Duration::ZERO);
+        let (text, _) = retry::complete(
+            model.as_ref(),
+            kernel,
+            request,
+            &request_cancel,
+            &policy,
+            (session, &ModelRequestId::new()),
+            |_| {},
         )
+        .await?;
+        if text.trim().is_empty() {
+            return Err(ModelError::Protocol("no text answer to the side question".into()).into());
+        }
+        Ok(text)
     };
     tokio::select! {
         biased;

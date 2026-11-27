@@ -297,7 +297,7 @@ async fn repl_side_questions_use_history_without_tools_or_session_records() {
     let output = String::from_utf8(output).unwrap();
     for expected in [
         "usage: /btw <question>",
-        "[btw] [model-mock] you said: context check (3 earlier items)",
+        "[btw] [model-mock] you said: context check",
         "[btw] [model-mock] tool `echo` is not offered",
         "[model-mock] you said: after (4 earlier items)",
     ] {

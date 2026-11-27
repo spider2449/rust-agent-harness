@@ -25,7 +25,9 @@ use std::{
 };
 
 use rah_api::{
-    KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope, async_trait,
+    KernelHandle, Plugin, PluginError, PluginId, PluginManifest, Scope,
+    agent_loop::{RUNNING_TURNS, RunningTurns},
+    async_trait,
     sandbox::SANDBOX,
     session::{SESSION, SessionAppended, SessionError, SessionLog},
 };
@@ -47,7 +49,9 @@ pub struct JsonlSessionPlugin {
 impl JsonlSessionPlugin {
     pub fn new(id: impl Into<PluginId>) -> Self {
         Self {
-            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION")).provides(["session"]),
+            manifest: PluginManifest::new(id, env!("CARGO_PKG_VERSION"))
+                .provides(["session"])
+                .optional(["running-turns"]),
         }
     }
 }
@@ -75,7 +79,8 @@ impl Plugin for JsonlSessionPlugin {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|error| format!("session directory `{}`: {error}", dir.display()))?;
-        let sessions = JsonlSessions::new(dir).with_events(scope.kernel());
+        let mut sessions = JsonlSessions::new(dir).with_events(scope.kernel());
+        sessions.running = scope.inject_optional(RUNNING_TURNS)?;
         scope.provide(SESSION, Arc::new(sessions))?;
         Ok(())
     }
@@ -136,6 +141,7 @@ pub struct JsonlSessions {
     /// modification time are unchanged lists the same.
     listed: std::sync::Mutex<HashMap<SessionId, Listed>>,
     events: Option<KernelHandle>,
+    running: Option<Arc<RunningTurns>>,
     /// A fixed workspace for new sessions, instead of the sandbox root.
     workspace: Option<String>,
 }
@@ -147,6 +153,7 @@ impl JsonlSessions {
             next_seq: Arc::new(Mutex::new(HashMap::new())),
             listed: std::sync::Mutex::new(HashMap::new()),
             events: None,
+            running: None,
             workspace: None,
         }
     }
@@ -666,8 +673,17 @@ impl SessionLog for JsonlSessions {
     }
 
     async fn delete(&self, session: &SessionId) -> Result<(), SessionError> {
-        let mut next = self.next_seq.lock().await;
-        let _writer = self.writer_lock().await?;
+        let reservation = self
+            .running
+            .as_ref()
+            .map(|running| {
+                running
+                    .reserve_session(session)
+                    .ok_or_else(|| SessionError::Busy(session.clone()))
+            })
+            .transpose()?;
+        let mut next = self.next_seq.clone().lock_owned().await;
+        let writer = self.writer_lock().await?;
         let path = self.path(session);
         if !tokio::fs::try_exists(&path)
             .await
@@ -696,11 +712,18 @@ impl SessionLog for JsonlSessions {
         tokio::fs::create_dir_all(&deleted)
             .await
             .map_err(|e| SessionError::Io(e.to_string()))?;
-        tokio::fs::rename(&path, deleted.join(format!("{session}.jsonl")))
-            .await
-            .map_err(|e| SessionError::Io(e.to_string()))?;
-        next.remove(session);
-        Ok(())
+        let session = session.clone();
+        // The rename can finish after the caller goes away. Keep the writer
+        // locks and turn exclusion until the archive move and cache update finish.
+        tokio::task::spawn_blocking(move || {
+            let (_writer, _reservation) = (writer, reservation);
+            std::fs::rename(path, path_in(&deleted, &session))
+                .map_err(|error| SessionError::Io(error.to_string()))?;
+            next.remove(&session);
+            Ok(())
+        })
+        .await
+        .map_err(|error| SessionError::Io(error.to_string()))?
     }
 }
 

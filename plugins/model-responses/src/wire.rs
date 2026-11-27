@@ -177,7 +177,9 @@ pub(crate) fn input(
         .iter()
         .map(|item| match item {
             ContextItem::System { text } => json!({"role": "system", "content": text}),
-            ContextItem::User { text } => json!({"role": "user", "content": text}),
+            ContextItem::User { text } | ContextItem::UserGuidance { text } => {
+                json!({"role": "user", "content": text})
+            }
             ContextItem::Assistant { text } if llamacpp => {
                 json!({"type": "message", "role": "assistant", "content": text})
             }

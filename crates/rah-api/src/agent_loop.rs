@@ -202,7 +202,7 @@ impl SteeringInbox {
                     },
                 )
                 .await?;
-            items.push(ContextItem::User { text: input });
+            items.push(ContextItem::UserGuidance { text: input });
             let _ = recorded.send(());
         }
         Ok(true)
@@ -215,9 +215,9 @@ impl Drop for SteeringInbox {
     }
 }
 
-/// What a turn fails with when its session already runs one.
+/// What a turn fails with when another operation has reserved the session.
 pub const TURN_RUNNING: &str =
-    "a turn is already running in this session; wait for it or cancel it";
+    "the session is in use; wait for the current operation or cancel the turn";
 
 /// Distribution-wide admission state shared by the standard loop instances.
 pub const RUNNING_TURNS: ServiceKey<RunningTurns> = ServiceKey::new("running-turns");
@@ -252,14 +252,22 @@ impl RunningTurns {
             .clone()
             .try_read_owned()
             .map_err(|_| "the loop is changing; retry the turn")?;
+        let reservation = self.reserve_session(session).ok_or(TURN_RUNNING)?;
+        Ok(RunningTurn {
+            _reservation: reservation,
+            _lease: lease,
+        })
+    }
+
+    /// Excludes turns and other exclusive operations on this session until dropped.
+    pub fn reserve_session(&self, session: &SessionId) -> Option<SessionReservation> {
         let mut running = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         if !running.insert(session.clone()) {
-            return Err(TURN_RUNNING);
+            return None;
         }
-        Ok(RunningTurn {
-            turns: self.clone(),
+        Some(SessionReservation {
+            sessions: self.sessions.clone(),
             session: session.clone(),
-            _lease: lease,
         })
     }
 }
@@ -267,15 +275,19 @@ impl RunningTurns {
 /// Held by a running turn; dropping it frees the session, however the turn
 /// ends (completion, failure, cancellation or a disposed scope).
 pub struct RunningTurn {
+    _reservation: SessionReservation,
     _lease: OwnedRwLockReadGuard<()>,
-    turns: RunningTurns,
+}
+
+/// Frees the session for a later operation when dropped.
+pub struct SessionReservation {
+    sessions: Arc<Mutex<HashSet<SessionId>>>,
     session: SessionId,
 }
 
-impl Drop for RunningTurn {
+impl Drop for SessionReservation {
     fn drop(&mut self) {
-        self.turns
-            .sessions
+        self.sessions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.session);
@@ -309,6 +321,10 @@ mod tests {
         let change = turns.try_change().unwrap();
         assert!(turns.admit(&one).is_err());
         drop(change);
+        let deletion = turns.reserve_session(&one).unwrap();
+        assert!(turns.begin(&one).is_none());
+        assert!(turns.begin(&other).is_some());
+        drop(deletion);
         assert!(turns.begin(&one).is_some());
     }
 }

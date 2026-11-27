@@ -301,7 +301,7 @@ fn hook(params: &Value) -> Option<Value> {
                 .unwrap()
                 .iter()
                 .rev()
-                .find(|item| item["type"] == "user")
+                .find(|item| matches!(item["type"].as_str(), Some("user" | "user_guidance")))
                 .and_then(|item| item["text"].as_str())
                 .map(str::to_owned);
             let added = match last.as_deref() {

@@ -411,21 +411,26 @@ impl Turn {
                 // tools asks for the step's result from what it has.
                 let last = rounds >= self.max_rounds;
                 rounds = rounds.saturating_add(1);
-                // The step instruction goes just before the turn's user message.
+                // Put the instruction just before the latest user input.
                 let mut context = items.clone();
                 let at = context
                     .iter()
-                    .rposition(|item| matches!(item, ContextItem::User { .. }))
+                    .rposition(|item| {
+                        matches!(
+                            item,
+                            ContextItem::User { .. } | ContextItem::UserGuidance { .. }
+                        )
+                    })
                     .unwrap_or(context.len());
                 context.insert(
                     at,
                     if steered {
                         ContextItem::System {
-                            text:
-                                "Continue the turn following the latest user guidance. Adapt the \
-                               earlier plan as needed. Use tools as needed and reply with the \
-                               result when done."
-                                    .into(),
+                            text: format!(
+                                "Earlier plan:\n{plan}\n\nContinue the turn following the latest \
+                                 user guidance. Adapt the earlier plan as needed. Use tools as \
+                                 needed and reply with the result when done."
+                            ),
                         }
                     } else {
                         instruction.clone()

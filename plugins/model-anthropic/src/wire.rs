@@ -188,7 +188,7 @@ pub(crate) fn conversation(
                 "user",
                 json!({"type": "text", "text": format!("[System note] {text}")}),
             ),
-            ContextItem::User { text } if !text.is_empty() => {
+            ContextItem::User { text } | ContextItem::UserGuidance { text } if !text.is_empty() => {
                 push(&mut messages, "user", json!({"type": "text", "text": text}));
             }
             ContextItem::Assistant { text } if !text.is_empty() => {
@@ -200,6 +200,7 @@ pub(crate) fn conversation(
             }
             ContextItem::System { .. }
             | ContextItem::User { .. }
+            | ContextItem::UserGuidance { .. }
             | ContextItem::Assistant { .. } => {}
             ContextItem::ToolCall {
                 call_id,

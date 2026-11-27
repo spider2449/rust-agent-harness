@@ -168,7 +168,10 @@ definition}` and returns `None` or `{"decision": "deny", "reason": "..."}` /
 `{"decision": "ask", "reason": "...", "level": "write"}` (`level` is optional). `tool.after_invoke` gets `{session,
 call, definition, output, effect}` and returns `None` or `{"output": <tool
 result>}`. `model.before_request` gets `{model, items, tools}` and returns
-`None` or `{"request": <request>}`.
+`None` or `{"request": <request>}`. When rewriting a request, preserve item
+types and order unless the hook deliberately transforms them. A
+`{"type": "user_guidance", "text": "..."}` item adds user input within the
+current turn. Keep it with the turn's first `user` item when shaping history.
 
 View nodes: `{"type": "heading"|"text"|"markdown", "text"}`,
 `{"type": "key_value", "items": [{"key", "value"}]}`,

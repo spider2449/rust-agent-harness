@@ -511,7 +511,7 @@ impl From<SessionError> for ApiError {
             SessionError::InvalidFork { .. }
             | SessionError::ForkDepthLimit(_)
             | SessionError::InvalidTitle => StatusCode::BAD_REQUEST,
-            SessionError::HasForks { .. } => StatusCode::CONFLICT,
+            SessionError::Busy(_) | SessionError::HasForks { .. } => StatusCode::CONFLICT,
             SessionError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
             SessionError::Corrupt { .. } | SessionError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

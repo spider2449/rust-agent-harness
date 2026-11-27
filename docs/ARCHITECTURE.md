@@ -78,6 +78,8 @@ frontend --TurnRequest--> loop
 
 The distribution provides `running-turns` to both standard loops. Admission
 holds a shared lease for each turn and allows one active turn per session.
+The JSONL provider uses the same session reservation while archiving a log,
+so deletion and a turn cannot overlap within one distribution.
 Admin operations that reconfigure, restart, stop, unmount or replace a
 mounted loop take the exclusive lease through the registry update. This
 also covers CLI, scheduled and delegated turns.

@@ -167,6 +167,10 @@ retried.
   "value": ...}` or `{"type": "image", "value": {"media_type", "data"}}`.
   Returned images are checked. The whole request crosses the pipe, so
   `max_message_bytes` must hold it.
+- A context item with `{"type": "user_guidance", "text": "..."}` is additional
+  user input in the current turn. Preserve its type and keep it with the
+  turn's first `user` item when shaping history. Model providers render it
+  with the user role.
 - `ask` needs an approver (a frontend); without one the call is denied.
 - A plugin with a higher priority than `policy-authority` decides first. An
   `allow` from it lets the call through without the policy. That is the

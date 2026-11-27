@@ -202,8 +202,10 @@ back the session's newest file change while the files are still what it left,
 one, for example `/call repo.status {}`.
 
 Between turns, use `/btw <question>` to ask about the current session.
-The active model answers from the recorded conversation and tool results.
-Side questions have no tool access, and the exchange stays out of the session log.
+The active model answers from the recorded conversation and tool results within
+the configured context window, with overflow recovery when mounted. Open the
+session's workspace before asking. Side questions have no tool access, and the
+exchange stays out of the session log.
 
 ## The Web UI
 
@@ -215,12 +217,14 @@ free port, and says so.
 - **Sessions** are grouped by the folder they worked in and searchable; with
   the `titles` feature the model names each one after its first turn. They can be renamed, forked,
   exported (Markdown or JSON) and deleted (moved to
-  `~/.rah/sessions/deleted/`; `scripts\sessions.ps1` restores them). The last
+  `~/.rah/sessions/deleted/`; `scripts\sessions.ps1` restores them). After
+  a running turn ends or is cancelled, retry the deletion. The last
   answer can be regenerated and an earlier message edited, both in a new
   branch.
 - **Side questions** open with `Ctrl+;` (`Cmd+;` on macOS) or `/btw`. Use
   `/btw <question>` to ask immediately. The side question can run while the
-  main turn is working and uses the session records available at the time.
+  main turn is working and uses the session records available at the time
+  with the session's workspace and configured context limits.
   It has no tool access and stays out of the session log. The shortcut
   preserves your draft in the main composer. Press `Esc` or **Close** to
   dismiss it.

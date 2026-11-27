@@ -335,7 +335,7 @@ async fn both_loops_pin_the_workspace_and_accept_steering_while_a_tool_runs() {
             SessionEntry::ToolResult { .. }
         ));
         let context = rah_api::session::rebuild_context(&records);
-        assert!(context.iter().any(|item| matches!(item, rah_protocol::ContextItem::User { text } if text == "/notool revised direction")));
+        assert!(context.iter().any(|item| matches!(item, rah_protocol::ContextItem::UserGuidance { text } if text == "/notool revised direction")));
         assert!(matches!(
             steering.send("too late"),
             Err(rah_api::agent_loop::SteeringError::Closed)
@@ -360,6 +360,7 @@ struct RequestGate {
     manifest: rah_api::PluginManifest,
     ready: std::sync::Arc<tokio::sync::Notify>,
     release: std::sync::Arc<tokio::sync::Notify>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<rah_protocol::ModelRequest>>>,
 }
 
 #[rah_api::async_trait]
@@ -370,8 +371,10 @@ impl rah_api::Plugin for RequestGate {
 
     async fn apply(&self, scope: &mut rah_api::Scope) -> Result<(), rah_api::PluginError> {
         let first = std::sync::Mutex::new(Some((self.ready.clone(), self.release.clone())));
+        let requests = self.requests.clone();
         scope.hook_waterfall::<rah_api::hooks::ModelBeforeRequest, _, _>(-100, move |request| {
             let first = first.lock().unwrap().take();
+            requests.lock().unwrap().push(request.clone());
             async move {
                 if let Some((ready, release)) = first {
                     ready.notify_one();
@@ -399,6 +402,7 @@ async fn steering_continues_a_turn_even_when_the_current_reply_has_no_tools() {
                 manifest: rah_api::PluginManifest::new("request-gate", "1"),
                 ready: ready.clone(),
                 release: release.clone(),
+                requests: Default::default(),
             }),
             rah_api::MountOptions::default(),
         )
@@ -437,6 +441,60 @@ async fn steering_continues_a_turn_even_when_the_current_reply_has_no_tools() {
             "turn-completed"
         ]
     );
+}
+
+#[tokio::test]
+async fn steering_during_planning_keeps_the_plan_in_the_execution_request() {
+    use futures::StreamExt;
+    use rah_api::agent_loop::{LOOP, TurnOrigin, TurnRequest};
+    use rah_protocol::ContextItem;
+
+    let dir = TempDir::new("steer-during-planning");
+    let mut distribution = headless(&dir);
+    let spec = distribution
+        .plugin
+        .iter_mut()
+        .find(|spec| spec.kind == "loop-react")
+        .unwrap();
+    spec.kind = "loop-plan".into();
+    let kernel = kernel(&distribution).await;
+    let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    kernel
+        .mount(
+            std::sync::Arc::new(RequestGate {
+                manifest: rah_api::PluginManifest::new("request-gate", "1"),
+                ready: ready.clone(),
+                release: release.clone(),
+                requests: requests.clone(),
+            }),
+            rah_api::MountOptions::default(),
+        )
+        .await
+        .unwrap();
+    let handle = kernel.handle();
+    let session = new_session(&handle).await;
+    let (events, steering) = handle.get(LOOP).unwrap().run_steerable_turn(TurnRequest {
+        origin: TurnOrigin::User,
+        session,
+        input: "/notool original plan marker".into(),
+        cancel: rah_api::CancellationToken::new(),
+    });
+    let events: Vec<_> = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        ready.notified().await;
+        let receipt = steering.unwrap().send("/notool revised direction").unwrap();
+        release.notify_one();
+        receipt.await.unwrap();
+        events.collect().await
+    })
+    .await
+    .unwrap();
+    assert!(answer(&events).contains("you said: revised direction"));
+    let requests = requests.lock().unwrap();
+    assert!(requests[1].items.iter().any(|item| matches!(
+        item, ContextItem::System { text } if text.contains("Earlier plan:\n[model-mock] you said: original plan marker")
+    )));
 }
 
 /// Inject failures on either side of the durable TurnStarted write.

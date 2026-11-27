@@ -12,8 +12,9 @@ use rah_api::{
 };
 use rah_plugin_host_process::ProcessPlugin;
 use rah_protocol::{
-    ContextItem, ModelRequest, PermissionLevel, RequestId, SessionEntry, SessionId, SessionInfo,
-    SessionRecord, ToolCall, ToolCallId, ToolContent, ToolEffect, ToolInput, ToolName, ToolOutput,
+    ContextItem, ImageContent, ModelRequest, PermissionLevel, RequestId, SessionEntry, SessionId,
+    SessionInfo, SessionRecord, ToolCall, ToolCallId, ToolContent, ToolEffect, ToolInput, ToolName,
+    ToolOutput,
 };
 use serde_json::{Value, json};
 
@@ -586,6 +587,53 @@ async fn model_before_request_extends_the_request_or_fails_it() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn model_before_request_preserves_guidance_and_its_tool_context_across_the_process() {
+    let kernel = Kernel::new();
+    mount_process(
+        &kernel,
+        config(&["--hook", "model.before_request"], Value::Null),
+    )
+    .await;
+    let request = ModelRequest {
+        items: vec![
+            // The fixture hangs if it sees this as the latest user input.
+            ContextItem::User {
+                text: "hang".into(),
+            },
+            ContextItem::ToolCall {
+                call_id: "image-1".into(),
+                name: ToolName::new("screenshot"),
+                arguments: json!({}),
+            },
+            ContextItem::ToolResult {
+                call_id: "image-1".into(),
+                output: ToolOutput {
+                    is_error: false,
+                    content: vec![ToolContent::Image(ImageContent {
+                        media_type: "image/png".into(),
+                        data: "AA==".into(),
+                    })],
+                },
+            },
+            ContextItem::UserGuidance {
+                text: "focus on the lower corner".into(),
+            },
+        ],
+        ..ModelRequest::default()
+    };
+    let mut expected = request.clone();
+    expected.items.push(ContextItem::System {
+        text: "from fixture".into(),
+    });
+    let rewritten = kernel
+        .handle()
+        .waterfall::<ModelBeforeRequest>(request)
+        .await
+        .unwrap();
+    assert_eq!(rewritten, expected);
 }
 
 #[tokio::test]

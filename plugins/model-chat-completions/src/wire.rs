@@ -127,7 +127,9 @@ pub(crate) fn messages(items: &[ContextItem], names: &ToolNames) -> Result<Vec<V
             ContextItem::System { text } => {
                 messages.push(json!({"role": "system", "content": text}));
             }
-            ContextItem::User { text } => messages.push(json!({"role": "user", "content": text})),
+            ContextItem::User { text } | ContextItem::UserGuidance { text } => {
+                messages.push(json!({"role": "user", "content": text}))
+            }
             ContextItem::Assistant { text } => {
                 messages.push(json!({"role": "assistant", "content": text}));
             }

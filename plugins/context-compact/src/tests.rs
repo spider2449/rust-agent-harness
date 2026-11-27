@@ -262,8 +262,11 @@ async fn a_large_current_turn_is_never_cut() {
     let model = FakeModel::new(Mode::Reply);
     let kernel = setup(&model, small(json!({}))).await;
     let big = user(&"x".repeat(200));
-    let items = vec![u("1"), a("1"), big.clone()];
-    let expected = vec![summary_of(2, "summary 1"), big];
+    let guidance = ContextItem::UserGuidance {
+        text: "follow-up".into(),
+    };
+    let items = vec![u("1"), a("1"), big.clone(), guidance.clone()];
+    let expected = vec![summary_of(2, "summary 1"), big, guidance];
     assert_eq!(shaped(&kernel, items.clone()).await, expected);
     // Only the current turn is left: nothing more to summarize.
     assert_eq!(shaped(&kernel, items).await, expected);

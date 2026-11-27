@@ -16,6 +16,11 @@ pub enum ContextItem {
     User {
         text: String,
     },
+    /// Additional user input within the current turn. Providers render it
+    /// with the user role. Context windows keep it with the turn's first input.
+    UserGuidance {
+        text: String,
+    },
     Assistant {
         text: String,
     },

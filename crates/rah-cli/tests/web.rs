@@ -333,7 +333,7 @@ async fn ask_decisions_are_answered_by_the_browser() {
 }
 
 #[tokio::test]
-async fn loop_settings_preserve_a_turn_waiting_for_approval() {
+async fn loop_settings_and_session_deletion_preserve_a_turn_waiting_for_approval() {
     let web = start("web-loop-busy", |distribution| {
         distribution
             .set_permissions(rah_cli::Permissions::Ask)
@@ -367,6 +367,17 @@ async fn loop_settings_preserve_a_turn_waiting_for_approval() {
             .json(&json!({ "id": "loop-react", "kind": "loop-plan", "config": {} }))
     };
     assert_eq!(web.status(replace()).await.0, 409);
+    let session_path = format!("/api/sessions/{}", session["id"].as_str().unwrap());
+    let delete = || web.request(reqwest::Method::DELETE, &session_path);
+    assert_eq!(web.status(delete()).await.0, 409);
+    let bulk = web
+        .json(
+            web.post("/api/sessions/delete")
+                .json(&json!({ "ids": [session["id"]] })),
+        )
+        .await;
+    assert_eq!(bulk["deleted"], json!([]));
+    assert_eq!(bulk["failed"][0]["id"], session["id"]);
     send(
         &mut socket,
         json!({ "type": "approval", "id": approval, "approve": true }),
@@ -381,6 +392,15 @@ async fn loop_settings_preserve_a_turn_waiting_for_approval() {
             _ => {}
         }
     }
+    let records = web.json(web.get(&session_path)).await;
+    assert!(
+        records
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["entry"]["kind"] == "tool_result")
+    );
+    assert_eq!(web.status(delete()).await.0, 200);
     let job = web
         .json(web.post("/api/jobs").json(&json!({"input":"scheduled"})))
         .await;

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v0.45.45 (2026-11-27)
+
+- Preserve the current turn's context and images when the user adds guidance.
+  The planning loop keeps its original plan available when adapting to guidance.
+- Apply configured context limits and overflow recovery to side questions
+  while keeping them tool-free and out of the session log.
+- Refuse to delete sessions with active turns so their tool results can be saved.
+- Check plugin dependency boundaries using Cargo metadata and verify that
+  process hooks can preserve guidance when rewriting model requests.
+
 ## v0.45.44 (2026-11-26)
 
 - Add `/btw` side questions using session history, with a keyboard shortcut

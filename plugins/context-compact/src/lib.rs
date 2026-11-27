@@ -467,6 +467,7 @@ pub fn size(item: &ContextItem) -> usize {
     match item {
         ContextItem::System { text }
         | ContextItem::User { text }
+        | ContextItem::UserGuidance { text }
         | ContextItem::Assistant { text } => text.len(),
         ContextItem::ToolCall { arguments, .. } => arguments.to_string().len(),
         ContextItem::ToolResult { output, .. } => output
@@ -533,7 +534,7 @@ fn clip(text: &str, max: usize) -> String {
 fn render(item: &ContextItem) -> String {
     match item {
         ContextItem::System { text } => format!("[Note] {text}"),
-        ContextItem::User { text } => format!("User: {text}"),
+        ContextItem::User { text } | ContextItem::UserGuidance { text } => format!("User: {text}"),
         ContextItem::Assistant { text } => format!("Assistant: {text}"),
         ContextItem::ToolCall {
             name, arguments, ..

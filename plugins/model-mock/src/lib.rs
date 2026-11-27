@@ -97,7 +97,7 @@ impl MockModel {
                     .unwrap_or_else(|| "tool".to_owned());
                 text(format!("[{label}] {tool} returned: {}", render(output)))
             }
-            Some(ContextItem::User { text: input }) => {
+            Some(ContextItem::User { text: input } | ContextItem::UserGuidance { text: input }) => {
                 let call_id = format!(
                     "mock-{}",
                     request
