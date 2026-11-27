@@ -8,12 +8,103 @@ import unittest
 import sys
 import shutil
 from pathlib import Path
+from textwrap import dedent
 
 sys.dont_write_bytecode = True
 import extract
 
 
 class ConnectionEvidenceTests(unittest.TestCase):
+    def test_inherited_cross_file_callback_uses_nearest_unambiguous_definition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "project"
+            root.mkdir()
+            (root / "base.py").write_text("class Base:\n    def on_done(self): pass\n")
+            (root / "worker.py").write_text(dedent("""\
+                from base import Base as Parent
+
+                class Inherited(Parent): pass
+                class Override(Inherited):
+                    def on_done(self): pass
+                class Shadowed(Inherited):
+                    if True:
+                        on_done = None
+                class Decorated(Inherited):
+                    @property
+                    def on_done(self): pass
+                class Rebound(Inherited):
+                    def reset(self):
+                        self.on_done = None
+                class Mixin: pass
+                class Multiple(Mixin, Inherited): pass
+                class Direct(Parent):
+                    def wire(self): self.signal.connect(self.on_done)
+                class AssignsCallback(Inherited):
+                    def __init__(self):
+                        self.on_done = self.fallback
+                    def fallback(self): pass
+                class ReboundOverride(AssignsCallback):
+                    def on_done(self): pass
+                class WithHandler(Parent):
+                    try:
+                        pass
+                    except Exception:
+                        pass
+                """))
+            cases = {
+                "inherited": ("Inherited", "", ("base.py", "L2")),
+                "handler": ("WithHandler", "", ("base.py", "L2")),
+                "override": ("Override", "", ("worker.py", "L5")),
+                "shadowed": ("Shadowed", "", None),
+                "decorated": ("Decorated", "", None),
+                "rebound": ("Rebound", "", None),
+                "rebound_override": ("ReboundOverride", "", None),
+                "multiple": ("Multiple", "", None),
+                "reassigned": ("Inherited", "        self.worker = None\n", None),
+                "missing": ("Missing", "", None),
+            }
+            for name, (worker, extra, _) in cases.items():
+                (root / f"{name}.py").write_text(
+                    f"from worker import {worker} as W\n"
+                    "from PySide6.QtWidgets import QPushButton\n"
+                    "class App:\n"
+                    "    def __init__(self):\n"
+                    "        self.worker = W()\n"
+                    "        self.button = QPushButton()\n"
+                    f"{extra}"
+                    "    def wire(self):\n"
+                    "        self.button.clicked.connect(self.worker.on_done)\n")
+            out = root.parent / "stage"
+            subprocess.run([sys.executable, "-I", str(Path(extract.__file__).resolve()),
+                            "extract", str(root), "--code-only", "--no-cluster", "--out", str(out)],
+                           cwd=root, env={**os.environ, "PYTHONHASHSEED": "0"}, check=True)
+            graph = json.loads((out / "graphify-out/graph.json").read_bytes())
+
+        nodes = {n["id"]: n for n in graph["nodes"]}
+        sites = {n["source_file"]: n for n in nodes.values() if "rah_connection" in n}
+        callbacks = {}
+        for edge in graph.get("edges", graph.get("links")):
+            if edge["relation"] == "callback":
+                site, target = nodes[edge["source"]], nodes[edge["target"]]
+                self.assertNotIn(site["source_file"], callbacks)
+                self.assertEqual(edge["confidence"], "INFERRED")
+                self.assertEqual(edge["source_location"], site["source_location"])
+                self.assertEqual(target["label"], ".on_done()")
+                callbacks[site["source_file"]] = (target["source_file"], target["source_location"])
+        self.assertEqual(set(sites), {f"{name}.py" for name in cases} | {"worker.py"})
+        for name, (_, extra, target) in cases.items():
+            with self.subTest(name=name):
+                file = f"{name}.py"
+                site = sites[file]
+                self.assertEqual(site["source_location"], "L9:9" if extra else "L8:9")
+                self.assertEqual(site["rah_connection"]["kind"], "qt")
+                self.assertEqual(site["rah_connection"]["slot"], "self.worker.on_done")
+                self.assertEqual(site["rah_connection"]["resolution"],
+                                 "inferred" if target else "unresolved")
+                self.assertEqual(callbacks.get(file), target)
+        self.assertEqual(callbacks["worker.py"], ("base.py", "L2"))
+        self.assertFalse(any("_rah_callback_class" in node for node in nodes.values()))
+
     def test_export_preserves_each_site_and_source(self):
         fixtures = Path(__file__).parent / "fixtures"
         cases = json.loads((fixtures / "navigation-cases.json").read_bytes())

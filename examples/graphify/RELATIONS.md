@@ -46,10 +46,13 @@ symbol label, the signal and callback expressions when present, and the full
 call expression with Graphify's credential redaction. Qt imports and recognizable receiver constructor bindings
 identify Qt candidates. Other calls remain general event candidates. An edge
 records a call site. An inferred `callback` edge links the site to a uniquely
-identified method. The extractor handles direct `self` references, simple
-same-file inheritance, and a single constructor assignment through an
-unambiguous absolute import rooted in the indexed workspace. Other callbacks
-retain the source expression and an unresolved status.
+identified method. For direct `self` references and receiver fields assigned
+once in the constructor through an unambiguous absolute import, the extractor
+can follow single inheritance across indexed files, including aliased base
+imports. It uses the nearest eligible method definition. An ambiguous binding,
+a property or other name that shadows the method, or an unsupported base
+encountered during lookup leaves the site unresolved with its source expression
+and location intact.
 
 Search the relationship view by callback expression to find the site nodes.
 Select a site to copy its source location and view the call text within the

@@ -42,10 +42,10 @@ def self_attribute(node):
     return None
 
 
-def binding_counts(module):
+def binding_counts(nodes):
     bindings = Counter()
     imported_names = Counter()
-    for node in ast.walk(module):
+    for node in nodes:
         if isinstance(node, ast.alias):
             if node.name == "*":
                 return Counter(), Counter()
@@ -60,14 +60,26 @@ def binding_counts(module):
             bindings[node.name] += 1
         elif isinstance(node, ast.MatchMapping):
             bindings[node.rest] += 1
+    bindings.pop(None, None)
     return bindings, imported_names
+
+
+def class_body_nodes(cls):
+    """Walk class bindings without entering nested namespaces."""
+    pending = list(cls.body)
+    while pending:
+        node = pending.pop()
+        yield node
+        if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                                 ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            pending.extend(ast.iter_child_nodes(node))
 
 
 def normalize_constructor_aliases(module, calls):
     """Let Graphify check class ownership and import edges using the declared name."""
     imports = {a.asname: a.name for stmt in module.body if isinstance(stmt, ast.ImportFrom)
                for a in stmt.names if a.asname}
-    bindings, imported_names = binding_counts(module)
+    bindings, imported_names = binding_counts(ast.walk(module))
     for call in calls:
         alias = call["_python_self_attr_type"]
         name = imports.get(alias)
@@ -81,7 +93,7 @@ def add_python_sites(module, graph, source_text):
     source = file_node["source_file"]
     source_key = sha256(source.replace("\\", "/").encode()).hexdigest()
     lines = source_text.encode().split(b"\n")
-    bindings, _ = binding_counts(module)
+    bindings, _ = binding_counts(ast.walk(module))
     qt_imports = {
         alias.asname or alias.name
         for stmt in module.body
@@ -121,12 +133,28 @@ def add_python_sites(module, graph, source_text):
     definitions = {(n["label"], n.get("source_location")): n for n in graph["nodes"]
                    if n.get("_callable")}
     imported_classes = {
-        alias.asname or alias.name: (stmt.module.replace(".", "/"), alias.name)
+        alias.asname or alias.name: ((stmt.module.replace(".", "/"), alias.name), stmt.lineno)
         for stmt in module.body if isinstance(stmt, ast.ImportFrom) and not stmt.level and stmt.module
         for alias in stmt.names if bindings[alias.asname or alias.name] == 1
     }
     scopes = {}
     for cls in classes.values():
+        class_bindings, _ = binding_counts(class_body_nodes(cls))
+        class_node = definitions.get((cls.name, f"L{cls.lineno}"))
+        if class_node:
+            base = None
+            if len(cls.bases) == 1 and not cls.keywords and isinstance(cls.bases[0], ast.Name):
+                base_name = cls.bases[0].id
+                local = classes.get(base_name)
+                imported = imported_classes.get(base_name)
+                if local and local.lineno < cls.lineno:
+                    base = (None, base_name)
+                elif imported and imported[1] < cls.lineno:
+                    base = imported[0]
+            instance_writes = sorted(
+                name for name in members[cls][0] if name is not None
+            )
+            class_node["_rah_callback_class"] = (base, sorted(class_bindings), instance_writes)
         names = defaultdict(list)
         for item in cls.body:
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -142,7 +170,8 @@ def add_python_sites(module, graph, source_text):
             target = definitions.get((f".{name}()", f"L{method.lineno}"))
             if target and (not method.decorator_list or target.get("_py_property")):
                 definitions_by_name[name] = target
-                if not method.decorator_list and not members[cls][0][name]:
+                if (not method.decorator_list and class_bindings[name] == 1
+                        and not members[cls][0][name]):
                     target["_rah_callback_method"] = True
         constructor_fields = {}
         initializers = names.get("__init__", [])
@@ -161,39 +190,27 @@ def add_python_sites(module, graph, source_text):
                                        source_file=source, source_location=location,
                                        rah_member=f"{cls.name}.{name}"))
             definitions_by_name[name] = graph["nodes"][-1]
-            class_node = definitions.get((cls.name, f"L{cls.lineno}"))
             if class_node:
                 graph["edges"].append(dict(source=class_node["id"], target=field_id, relation="contains",
                                            confidence="EXTRACTED", source_file=source,
                                            source_location=location, weight=1.0))
-        scopes[cls] = names, definitions_by_name, constructor_fields
+        scopes[cls] = class_bindings, definitions_by_name, constructor_fields
 
     def callback_target(cls, slot):
         name = self_attribute(slot)
         if name:
-            while cls in scopes:
-                names, targets, _ = scopes[cls]
-                if members[cls][0][name]:
-                    return None
-                if name in names:
-                    target = targets.get(name)
-                    return [None, cls.name, name] if target and target.get("_rah_callback_method") else None
-                if len(cls.bases) != 1 or not isinstance(cls.bases[0], ast.Name):
-                    break
-                base = classes.get(cls.bases[0].id)
-                if base is None or base.lineno >= cls.lineno:
-                    break
-                cls = base
-            return None
+            return [None, cls.name, name]
         if isinstance(slot, ast.Attribute) and cls in scopes:
             receiver = self_attribute(slot.value)
-            _, _, fields = scopes[cls]
-            if receiver and members[cls][0][receiver] == 1 and len(fields.get(receiver, [])) == 1:
+            class_bindings, targets, fields = scopes[cls]
+            if (receiver and not class_bindings[receiver] and members[cls][0][receiver] == 1
+                    and targets.get("__init__", {}).get("_rah_callback_method")
+                    and len(fields.get(receiver, [])) == 1):
                 value = fields[receiver][0].value
                 if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
                     imported = imported_classes.get(value.func.id)
                     if imported:
-                        return [*imported, slot.attr]
+                        return [*imported[0], slot.attr]
         return None
 
     def expression(node):
@@ -351,26 +368,62 @@ extractor.extract_python = extractor._DISPATCH[".py"] = extract_python
 def extract_workspace(*args, **kwargs):
     graph = _extract_workspace(*args, **kwargs)
     by_id = {node["id"]: node for node in graph["nodes"]}
-    definitions = defaultdict(list)
+    paths = {node["source_file"].replace("\\", "/") for node in graph["nodes"]
+             if node.get("source_file")}
+    classes = defaultdict(list)
+    class_details = {}
+    for node in graph["nodes"]:
+        details = node.pop("_rah_callback_class", None)
+        if details is not None:
+            path = node["source_file"].replace("\\", "/")
+            classes[path, node["label"]].append(node["id"])
+            base, bindings, instance_writes = details
+            class_details[node["id"]] = (path, base, set(bindings), set(instance_writes))
+    methods = defaultdict(list)
     for edge in graph["edges"]:
         if edge["relation"] == "method":
-            owner, method = by_id.get(edge["source"]), by_id.get(edge["target"])
-            if owner and method and method.get("_rah_callback_method"):
-                path = owner["source_file"].replace("\\", "/")
-                definitions[path, owner["label"], method["label"]].append(method)
+            method = by_id.get(edge["target"])
+            if edge["source"] in class_details and method and method.get("_rah_callback_method"):
+                methods[edge["source"], method["label"]].append(method["id"])
+
+    def resolve(path, module, cls, method):
+        visited = set()
+        target = None
+        while True:
+            if module is not None:
+                matches = paths.intersection((module + ".py", module + "/__init__.py"))
+                if len(matches) != 1:
+                    break
+                path = matches.pop()
+            candidates = classes.get((path, cls), [])
+            if len(candidates) != 1:
+                break
+            owner = candidates[0]
+            path, base, bindings, instance_writes = class_details[owner]
+            if owner in visited or method in instance_writes:
+                return None
+            visited.add(owner)
+            if target is None:
+                targets = methods.get((owner, f".{method}()"), [])
+                if len(targets) == 1:
+                    target = targets[0]
+                elif targets or method in bindings:
+                    return None
+            # An inherited initializer can assign the instance attribute even
+            # when a nearer class defines a method with the same name.
+            if base is None:
+                break
+            module, cls = base
+        return target
+
     for node in graph["nodes"]:
         candidate = node.pop("_rah_callback", None)
         if not node.get("rah_connection"):
             continue
-        matches = []
-        if candidate:
-            module, cls, method = candidate
-            paths = ((node["source_file"].replace("\\", "/"),) if module is None
-                     else (module + ".py", module + "/__init__.py"))
-            matches = [target for path in paths for target in definitions[path, cls, f".{method}()"]]
-        node["rah_connection"]["resolution"] = "inferred" if len(matches) == 1 else "unresolved"
-        if len(matches) == 1:
-            graph["edges"].append(dict(source=node["id"], target=matches[0]["id"],
+        target = resolve(node["source_file"].replace("\\", "/"), *candidate) if candidate else None
+        node["rah_connection"]["resolution"] = "inferred" if target else "unresolved"
+        if target:
+            graph["edges"].append(dict(source=node["id"], target=target,
                                        relation="callback", confidence="INFERRED",
                                        source_file=node["source_file"],
                                        source_location=node["source_location"], weight=1.0))
